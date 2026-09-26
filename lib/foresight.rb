@@ -5,6 +5,7 @@ require_relative "foresight/version"
 require_relative "foresight/input_error"
 require_relative "foresight/frequency"
 require_relative "foresight/series"
+require_relative "foresight/classifier"
 
 module Foresight
   DEFAULT_COUNT   = 10
@@ -12,4 +13,8 @@ module Foresight
   DEFAULT_SEED    = 0
   DEFAULT_PATHS   = 10_000
   DEFAULT_WINDOWS = 2
+
+  def self.classify(series)
+    Classifier.call(Series.parse(series, keys_required: false).exact)
+  end
 end
