@@ -3,6 +3,8 @@
 require "date"
 require_relative "foresight/version"
 require_relative "foresight/input_error"
+require_relative "foresight/frequency"
+require_relative "foresight/series"
 
 module Foresight
   DEFAULT_COUNT   = 10
