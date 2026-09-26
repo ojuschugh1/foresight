@@ -1,0 +1,8 @@
+*.gem
+Gemfile.lock
+.DS[_]Store
+.bundle/
+tmp/
+.venv/
+vendor/
+__pycache__/
