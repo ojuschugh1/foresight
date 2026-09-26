@@ -100,4 +100,21 @@ module Oracles
     indicators = values.map { |value| value == 0 ? 0.0 : 1.0 }
     smoothed(indicators, alpha_p) * smoothed(sizes, alpha_d)
   end
+
+  def normal_quantile(level)
+    return -normal_quantile(1 - level) if level > 0.5
+
+    low = -40.0
+    high = 0.0
+    loop do
+      middle = (low + high) / 2
+      return middle if middle == low || middle == high
+
+      if 0.5 * Math.erfc(-middle / Math.sqrt(2)) < level
+        low = middle
+      else
+        high = middle
+      end
+    end
+  end
 end
