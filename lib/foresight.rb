@@ -7,6 +7,7 @@ require_relative "foresight/frequency"
 require_relative "foresight/series"
 require_relative "foresight/classifier"
 require_relative "foresight/normal"
+require_relative "foresight/empirical_quantile"
 require_relative "foresight/smoothing"
 require_relative "foresight/naive"
 require_relative "foresight/seasonal_naive"
@@ -15,6 +16,8 @@ require_relative "foresight/croston_classic"
 require_relative "foresight/croston_sba"
 require_relative "foresight/tsb"
 require_relative "foresight/gaussian_strategy"
+require_relative "foresight/compound_strategy"
+require_relative "foresight/simulator"
 
 module Foresight
   DEFAULT_COUNT   = 10

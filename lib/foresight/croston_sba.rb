@@ -14,5 +14,16 @@ module Foresight
     def forecast(horizon)
       @classic.forecast(horizon).map { |value| @factor * value }
     end
+
+    def probability
+      return 0.0 if sizes.empty?
+
+      # Scaling the occurrence probability by the SBA factor is Foresight's own choice, see docs/methodology.md
+      [1.0, @factor / @classic.interval].min
+    end
+
+    def sizes
+      @classic.sizes
+    end
   end
 end

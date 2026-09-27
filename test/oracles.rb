@@ -163,4 +163,56 @@ module Oracles
     periods = 1..horizon
     periods.map { |period| periods.map { |other| yield(*[period, other].minmax) } }
   end
+
+  def compound_cdf(probability, sizes, value)
+    return 1r if sizes.empty?
+
+    chance = probability.to_r
+    1 - chance + chance * Rational(sizes.count { |size| size <= value }, sizes.size)
+  end
+
+  def compound_quantiles(probability, observations, levels)
+    sizes = observations.reject { |observation| observation == 0 }
+    cdf = [0.0, *sizes].uniq.to_h { |value| [value, compound_cdf(probability, sizes, value)] }
+    levels.to_h { |level| [level, cdf.select { |_, chance| chance >= level.to_r }.keys.min] }
+  end
+
+  def compound_masses(probability, sizes)
+    return { 0r => 1r } if sizes.empty?
+
+    chance = probability.to_r
+    masses = Hash.new(0r)
+    masses[0r] += 1 - chance
+    sizes.each { |size| masses[size.to_r] += chance / sizes.size }
+    masses
+  end
+
+  def total_distribution(probability, sizes, horizon)
+    masses = compound_masses(probability, sizes)
+    (1..horizon).inject({ 0r => 1r }) do |distribution, _period|
+      distribution.each_with_object(Hash.new(0r)) do |(total, mass), convolved|
+        masses.each { |size, chance| convolved[total + size] += mass * chance }
+      end
+    end
+  end
+
+  def unreachable_totals(totals, sizes, horizon)
+    return totals.reject(&:zero?) if sizes.empty?
+
+    exact = sizes.map(&:to_r)
+    denominator = exact.map(&:denominator).inject(:lcm)
+    unit = Rational(exact.map { |size| (size * denominator).to_i }.inject(:gcd), denominator)
+    steps = exact.map { |size| (size / unit).to_i }.uniq
+    mask = (1 << ((totals.max.to_r / unit).floor.clamp(0, horizon * steps.max) + 1)) - 1
+    terms = 1
+    sums = 0
+    horizon.times do
+      terms = steps.inject(0) { |union, step| union | (terms << step) } & mask
+      sums |= terms
+    end
+    totals.reject do |total|
+      count = total.to_r / unit
+      total.zero? || (count.denominator == 1 && sums[count.to_i] == 1)
+    end
+  end
 end
