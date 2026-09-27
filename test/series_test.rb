@@ -1,10 +1,13 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "minitest/mock"
 require "foresight"
 
 class SeriesTest < Minitest::Test
   SEED = 104_729
+  NO_DEMAND = "classification requires at least one non-zero observation"
+  Created = Class.new(StandardError)
 
   def test_valid_input_parses_to_float_values_in_key_order_and_is_left_unchanged
     each_seed(200) do |seed, random|
@@ -208,7 +211,164 @@ class SeriesTest < Minitest::Test
     assert_equal "cannot key monthly forecasts after 2026-01-31: 2026-02 has no day 31", error.message
   end
 
+  def test_forecast_and_classify_leave_valid_input_unchanged
+    seen = []
+    each_seed(100) do |seed, random|
+      call = Generators.forecast_call(random, model: [nil, *Generators::MODEL_NAMES].sample(random: random),
+                                              strategy: Generators::STRATEGY_NAMES.sample(random: random),
+                                              keyed: random.rand < 0.7)
+      call.input.freeze if random.rand < 0.3
+      before = snapshot(call.input)
+      about = "seed #{seed}: #{safe_inspect(call.input)} #{safe_inspect(call.options)}"
+      forecast = outcome { Foresight.forecast(call.input, **call.options) }
+
+      assert_instance_of Foresight::Result, forecast, about
+      assert_equal before, snapshot(call.input), about
+      classified = outcome { Foresight.classify(call.input) }
+      assert_equal before, snapshot(call.input), about
+      seen << (call.keys ? :keyed : :array) << (call.input.frozen? ? :frozen : :unfrozen)
+      seen << (Foresight::InputError === classified ? :refused : :classified)
+    end
+    assert_equal %i[array classified frozen keyed refused unfrozen], seen.uniq.sort, "seed #{SEED}"
+  end
+
+  def test_forecast_and_classify_leave_invalid_input_unchanged
+    seen = []
+    each_seed(100) do |seed, random|
+      input, = Generators.invalid_series(random)
+      input.freeze if (Hash === input || Array === input) && random.rand < 0.3
+      before = snapshot(input)
+      about = "seed #{seed}: #{safe_inspect(input)}"
+
+      assert_instance_of Foresight::InputError, outcome { Foresight.forecast(input) }, about
+      assert_equal before, snapshot(input), about
+      outcome { Foresight.classify(input) }
+      assert_equal before, snapshot(input), about
+      seen << (Kernel.instance_method(:frozen?).bind_call(input) ? :frozen : :unfrozen)
+    end
+    assert_equal %i[frozen unfrozen], seen.uniq.sort, "seed #{SEED}"
+  end
+
+  def test_invalid_series_raise_the_first_violated_message_before_any_model_or_random_is_created
+    seen = []
+    each_seed(200) do |seed, random|
+      input, _, kind, message = Generators.invalid_series(random)
+      about = "seed #{seed}: #{safe_inspect(input)}"
+      forecast, classified = unbuilt { [outcome { Foresight.forecast(input) }, outcome { Foresight.classify(input) }] }
+      expected = classify_refusal(input, kind, message)
+
+      assert_instance_of Foresight::InputError, forecast, about
+      assert_equal kind == :container ? message : Generators.violation(input, true).last, forecast.message, about
+      if expected
+        assert_instance_of Foresight::InputError, classified, about
+        assert_equal expected, classified.message, about
+      else
+        assert_instance_of Foresight::Classification, classified, about
+      end
+      seen << kind
+      seen << :empty if Hash === input && input.empty?
+      seen << :classified unless expected
+    end
+    assert_equal %i[classified container count empty frequency key negative too_large value], seen.uniq.sort,
+                 "seed #{SEED}"
+  end
+
+  def test_valid_calls_reach_the_stubbed_models_and_random
+    series = [3, 0, 4, 0, 0, 6, 2, 0]
+    [nil, *Generators::MODEL_NAMES].product(Generators::STRATEGY_NAMES).each do |model, strategy|
+      options = { model: model, strategy: strategy, count: 2, season_length: 2, paths: 200 }
+      assert_raises(Created, safe_inspect(options)) { unbuilt { Foresight.forecast(series, **options) } }
+    end
+    assert_raises(Created) do
+      Random.stub(:new, proc { raise Created }) { Foresight.forecast(series, model: :tsb, paths: 200) }
+    end
+  end
+
+  def test_forecast_keys_continue_the_series_frequency_and_extend_it
+    seen = []
+    each_seed(200) do |seed, random|
+      unit = Generators::UNITS.sample(random: random)
+      keys, period = round_trip_keys(random, unit, [Generators.run_length(random), 2].max)
+      input = keys.zip(Generators.numbers(random, keys.size)).shuffle(random: random).to_h
+      count = random.rand(1..12)
+      last = keys.last
+      about = "seed #{seed}, count #{count}: #{safe_inspect(input)}"
+      future = Foresight.forecast(input, model: :naive, count: count).forecast.keys
+      expected = Generators.future_keys(last, period, count)
+
+      assert_equal expected, future.map { |key| Time === key ? key.to_r : key }, about
+      assert_equal [zone_of(last)] * count, future.map { |key| zone_of(key) }, about
+      extended = input.merge(future.to_h { |key| [key, bounded_value(random)] })
+      original = parse(input).frequency
+      frequency = accepted(extended, true, about).frequency
+      assert_frequency period, frequency, about
+      assert_equal [original.unit, original.seconds], [frequency.unit, frequency.seconds], about
+      assert_equal count, Foresight.forecast(extended, model: :naive, count: count).forecast.size, about
+      seen << unit
+      seen << (last.utc? ? :utc : :offset) << (period.denominator > 1 ? :fractional : :whole) if Time === last
+    end
+    assert_equal %i[day fractional month offset second utc week whole year], seen.uniq.sort, "seed #{SEED}"
+  end
+
+  def test_forecast_refuses_monthly_keys_whose_day_a_future_month_lacks
+    [
+      [{ Date.new(2025, 12, 31) => 3, Date.new(2026, 1, 31) => 4 }, 1, "2026-01-31: 2026-02 has no day 31"],
+      [{ Date.new(2026, 8, 31) => 0, Date.new(2026, 7, 31) => 5 }, 2, "2026-08-31: 2026-09 has no day 31"],
+      [{ Date.new(2027, 1, 29) => 2, Date.new(2026, 12, 29) => 1 }, 12, "2027-01-29: 2027-02 has no day 29"]
+    ].each do |input, count, message|
+      error = assert_raises(Foresight::InputError) { Foresight.forecast(input, model: :naive, count: count) }
+      assert_equal "cannot key monthly forecasts after #{message}", error.message
+    end
+    leap = { Date.new(2027, 12, 29) => 2, Date.new(2028, 1, 29) => 1 }
+    assert_equal [Date.new(2028, 2, 29)], Foresight.forecast(leap, model: :naive, count: 1).forecast.keys
+  end
+
   private
+
+  def round_trip_keys(random, unit, size)
+    return Generators.regular_keys(random, unit, size) unless unit == :month
+
+    start = random.rand(22_800..24_400)
+    day = random.rand(1..28)
+    [Array.new(size) { |index| Generators.calendar_date(start + index, day) }, :month]
+  end
+
+  def bounded_value(random)
+    random.rand < 0.5 ? random.rand(0..10**15) : random.rand(0.0..1e15)
+  end
+
+  def unbuilt(classes = [Random, *Foresight::MODELS.values], &block)
+    return yield if classes.empty?
+
+    classes.first.stub(:new, proc { raise Created }) { unbuilt(classes.drop(1), &block) }
+  end
+
+  def classify_refusal(input, kind, message)
+    return message if kind == :container
+
+    found = Generators.violation(input, false)
+    return found.last if found
+
+    NO_DEMAND if input.values.all?(&:zero?)
+  end
+
+  def outcome
+    yield
+  rescue Foresight::InputError => e
+    e
+  end
+
+  def snapshot(input)
+    entries = case input
+              when Hash then input.map { |key, value| [state(key), state(value)] }
+              when Array then input.map { |value| state(value) }
+              end
+    [state(input), Kernel.instance_method(:frozen?).bind_call(input), entries]
+  end
+
+  def state(object)
+    [object.__id__, safe_inspect(object), (Time === object ? [object.utc_offset, object.zone] : nil)]
+  end
 
   def each_seed(count)
     rng = Random.new(SEED)

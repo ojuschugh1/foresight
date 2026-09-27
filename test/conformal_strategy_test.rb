@@ -72,7 +72,42 @@ class ConformalStrategyTest < Minitest::Test
     assert_equal 44.0 - total_errors.min, strategy.lead_time_quantiles[0.5]
   end
 
+  def test_automatic_forecasts_refit_the_selected_model_in_every_window
+    seen = []
+    each_seed(120) do |seed, random|
+      call, options = automatic_call(random)
+      result = Foresight.forecast(call.input, **options)
+      values = Oracles.option_values(options)
+      about = "seed #{seed}: #{safe_inspect(call.input)} #{safe_inspect(options)}"
+      expected = Oracles.conformal_quantiles(result.model, call.numbers.map(&:to_f), values, values[:count],
+                                             values[:levels])
+
+      assert_equal Foresight::Selector::RULE.fetch(Oracles.classification(call.numbers)[:demand_class]),
+                   result.model, about
+      expected.each do |level, (steps, total)|
+        at = "#{about}, level #{level.inspect}"
+        table = result.quantiles[level]
+
+        assert_equal steps.map { |step| censored(step) }, Hash === table ? table.values : table, at
+        assert_equal censored(total), result.lead_time_quantiles[level], at
+      end
+      seen << result.model << (call.keys ? :keyed : :array)
+      seen << :two_windows if options[:windows] == 2
+      seen << :six_windows if options[:windows] == 6
+    end
+    assert_equal %i[array croston_sba keyed ses six_windows two_windows], seen.uniq.sort, "seed #{SEED}"
+  end
+
   private
+
+  def automatic_call(random)
+    windows = random.rand(2..6)
+    loop do
+      call = Generators.forecast_call(random, model: nil, strategy: :conformal, keyed: random.rand < 0.5)
+      options = call.options.merge(windows: windows)
+      return [call, options] if call.numbers.size >= Generators.shortest_history(options)
+    end
+  end
 
   def each_seed(count)
     rng = Random.new(SEED)

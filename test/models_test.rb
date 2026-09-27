@@ -11,6 +11,7 @@ class ModelsTest < Minitest::Test
   FLAT = %i[ses croston_classic croston_sba tsb].freeze
   INTERMITTENT = %i[croston_classic croston_sba tsb].freeze
   OPTIONS = { alpha: 0.1, alpha_d: 0.1, alpha_p: 0.1, season_length: 7 }.freeze
+  ZEROS = [0, 0.0, -0.0, Rational(0)].freeze
 
   def test_point_forecasts_match_the_oracle_on_random_histories
     seen = []
@@ -115,7 +116,57 @@ class ModelsTest < Minitest::Test
     end
   end
 
+  def test_point_forecasts_and_the_reported_model_do_not_depend_on_the_strategy
+    seen = []
+    each_seed(150) do |seed, random|
+      model = [nil, *NAMES].sample(random: random)
+      call = Generators.forecast_call(random, model: model, strategy: :conformal, keyed: random.rand < 0.5)
+      about = "seed #{seed}: #{safe_inspect(call.input)} #{safe_inspect(call.options)}"
+      conformal = Foresight.forecast(call.input, **call.options)
+      distribution = Foresight.forecast(call.input, **call.options.merge(strategy: :distribution))
+
+      assert_equal :conformal, conformal.strategy, about
+      assert_equal :distribution, distribution.strategy, about
+      assert_equal conformal.model, distribution.model, about
+      assert_equal conformal.forecast, distribution.forecast, about
+      assert_identical steps(conformal.forecast), steps(distribution.forecast), about
+      seen << (model || :automatic) << (call.keys ? :keyed : :array)
+    end
+    assert_equal [:array, :automatic, :keyed, *NAMES].sort, seen.uniq.sort, "seed #{SEED}"
+  end
+
+  def test_all_zero_series_give_zero_forecasts_and_quantiles_under_every_model_and_strategy
+    seen = []
+    each_seed(100) do |seed, random|
+      options = Generators.forecast_options(random, :seasonal_naive, :conformal)
+      options[:paths] = Generators.option_value(random, :paths)
+      size = Generators.shortest_history(options) + Generators.extra_length(random)
+      zeros = Array.new(size) { ZEROS.sample(random: random) }
+      input = random.rand < 0.5 ? zeros : Generators.forecast_keys(random, size).zip(zeros).shuffle(random: random).to_h
+      values = Oracles.option_values(options)
+      expected = Array.new(values[:count], 0.0)
+      about = "seed #{seed}: #{safe_inspect(input)} #{safe_inspect(options)}"
+      NAMES.product(Generators::STRATEGY_NAMES).each do |name, strategy|
+        result = Foresight.forecast(input, **options.merge(model: name, strategy: strategy))
+        where = "#{about}, #{name} under #{strategy}"
+
+        assert_equal expected, steps(result.forecast), where
+        assert_equal values[:levels].size, result.quantiles.size, where
+        result.quantiles.each_value { |table| assert_equal expected, steps(table), where }
+        assert_equal Array.new(values[:levels].size, 0.0), result.lead_time_quantiles.values, where
+        assert_nil result.demand_class, where
+        assert_equal "#{name} was specified by the caller", result.reason, where
+      end
+      seen << (Hash === input ? :keyed : :array)
+    end
+    assert_equal %i[array keyed], seen.uniq.sort, "seed #{SEED}"
+  end
+
   private
+
+  def steps(table)
+    Hash === table ? table.values : table
+  end
 
   def each_seed(count)
     rng = Random.new(SEED)

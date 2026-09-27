@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "oracles"
 require "foresight"
 
 class SelectorTest < Minitest::Test
@@ -94,6 +95,30 @@ class SelectorTest < Minitest::Test
       classes << classification.demand_class
     end
     assert_equal DEMAND_CLASSES.sort, classes.uniq.sort, "seed #{SEED}"
+  end
+
+  def test_automatic_forecasts_report_the_rule_for_the_classification_of_the_complete_series
+    seen = []
+    each_seed(200) do |seed, random|
+      call = Generators.forecast_call(random, model: nil, strategy: Generators::STRATEGY_NAMES.sample(random: random),
+                                              keyed: random.rand < 0.5)
+      about = "seed #{seed}: #{safe_inspect(call.input)} #{safe_inspect(call.options)}"
+      result = Foresight.forecast(call.input, **call.options)
+      expected = Oracles.classification(call.numbers)
+      match = REASON.match(result.reason)
+
+      assert_equal Foresight::Selector::RULE.fetch(expected[:demand_class]), result.model, about
+      assert_equal expected[:demand_class], result.demand_class, about
+      refute_nil match, "#{about}: #{result.reason.inspect}"
+      assert_equal [result.model, result.demand_class].map(&:to_s), match.captures.first(2), about
+      match.captures.drop(2).zip(expected.values_at(:adi, :cv_squared)).each do |text, exact|
+        difference = (Rational(text) - exact).abs
+
+        assert_operator difference, :<=, BOUND, "#{about}: #{result.reason.inspect}"
+      end
+      seen << result.demand_class << result.strategy
+    end
+    assert_equal %i[conformal distribution erratic intermittent lumpy smooth], seen.uniq.sort, "seed #{SEED}"
   end
 
   private
