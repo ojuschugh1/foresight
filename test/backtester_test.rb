@@ -13,6 +13,11 @@ class BacktesterTest < Minitest::Test
   LEVEL_COUNTS = %i[covered coverage lead_time_hit].freeze
   WINDOW_NAMES = %i[horizon origins step].freeze
   MODEL_LABELS = %i[automatic naive seasonal_naive ses croston_classic croston_sba tsb].freeze
+  CLASS_NAMES = %i[smooth erratic intermittent lumpy].freeze
+  COUNT_NAMES = %i[excluded_origins zero_scale_origins held_out zero_held_out nonzero_held_out].freeze
+  MEANS = %i[mae rmse mase].freeze
+  LEVEL_POOL = [0.1, 0.25, 0.5, 0.8, 0.9, 0.95].freeze
+  ForecastMade = Class.new(StandardError)
 
   def test_each_origin_is_a_forecast_of_its_prefix_scored_on_the_held_out_window
     seen = []
@@ -205,7 +210,190 @@ class BacktesterTest < Minitest::Test
     assert_equal %i[mixed_window nil_loss zero_scale], seen.uniq.sort, "seed #{SEED}"
   end
 
+  def test_the_report_aggregates_each_demand_class_from_its_series_records
+    seen = []
+    each_seed(150) do |seed, random|
+      horizon = random.rand(1..7)
+      levels = LEVEL_POOL.sample(random.rand(1..4), random: random).sort
+      entries = Array.new(random.rand(0..8)) do |position|
+        Foresight::SeriesEntry.new(index: position * 3 + random.rand(3),
+                                   demand_class: CLASS_NAMES.sample(random: random),
+                                   backtest: built_backtest(random, horizon, levels))
+      end
+      records = entries.map { |entry| [entry.index, entry.demand_class, entry.backtest.to_h] }
+      about = "seed #{seed}: #{safe_inspect(records)} #{safe_inspect([horizon, levels])}"
+      report = Foresight::EvaluationReport.aggregate(entries, horizon: horizon, levels: levels)
+      assert_equal CLASS_NAMES, report.classes.keys, about
+      assert_equal entries, report.series, about
+      assert_equal typed([0, levels]), typed([report.excluded_series, report.levels]), about
+      CLASS_NAMES.each do |demand_class|
+        backtests = entries.select { |entry| entry.demand_class == demand_class }.map(&:backtest)
+        summary = report.classes[demand_class]
+        assert_class_summary backtests, summary, levels, "#{about} #{demand_class}"
+        assert_equal demand_class, summary.demand_class, about
+        seen << :empty if backtests.empty?
+        seen << :several if backtests.size > 1
+        seen << :nil_loss if !backtests.empty? && summary.scaled_pinball.value?(nil)
+        seen << :no_divisor if !backtests.empty? && summary.held_out.zero?
+      end
+    end
+    assert_equal %i[empty nil_loss no_divisor several], seen.uniq.sort, "seed #{SEED}"
+  end
+
+  def test_evaluate_reports_each_series_as_its_own_backtest_grouped_by_class
+    seen = []
+    each_seed(100) do |seed, random|
+      model = [nil, *Generators::MODEL_NAMES].sample(random: random)
+      options = Generators.backtest_options(random, model, Generators::STRATEGY_NAMES.sample(random: random))
+      settings = Oracles.backtest_settings(options)
+      calls = Array.new(random.rand(1..4)) do
+        size = Oracles.backtest_length(settings) + extra_length(random)
+        values = Generators.backtest_values(random, size, settings[:horizon], mixed: random.rand < 0.5)
+        values.map! { Generators::ZEROS.sample(random: random) } if random.rand < 0.2
+        Generators.backtest_call(random, options, values, keyed: random.rand < 0.5)
+      end
+      inputs = calls.map(&:input)
+      about = "seed #{seed}: #{safe_inspect(inputs)} #{safe_inspect(options)}"
+      report = Foresight.evaluate(inputs, **options)
+      kept = calls.each_index.reject { |index| calls[index].numbers.all?(&:zero?) }
+      assert_equal typed([calls.size - kept.size]), typed([report.excluded_series]), about
+      assert_equal kept, report.series.map(&:index), about
+      kept.zip(report.series).each do |index, entry|
+        assert_instance_of Foresight::SeriesEntry, entry, about
+        assert_equal Foresight.backtest(inputs[index], **options), entry.backtest, "#{about} series #{index}"
+        assert_equal Foresight.classify(inputs[index]).demand_class, entry.demand_class, "#{about} series #{index}"
+        seen << entry.demand_class
+      end
+      grouped = Foresight::EvaluationReport.aggregate(report.series, horizon: settings[:horizon],
+                                                                     levels: report.levels)
+      assert_equal CLASS_NAMES, report.classes.keys, about
+      assert_equal grouped.classes, report.classes, about
+      seen << settings[:strategy]
+      seen << :set_aside if kept.size < calls.size
+    end
+    assert_equal [*CLASS_NAMES, *Generators::STRATEGY_NAMES, :set_aside].sort, seen.uniq.sort, "seed #{SEED}"
+  end
+
+  def test_evaluate_checks_every_series_length_before_back_testing_any
+    refusing = Object.new
+    refusing.define_singleton_method(:call) { |_series| raise ForecastMade }
+    refused = proc { refusing }
+    Foresight::Forecaster.stub(:new, refused) do
+      assert_raises(ForecastMade) { Foresight.evaluate([[3, 5, 4, 6]], horizon: 1, origins: 1, model: :naive) }
+    end
+    seen = []
+    each_seed(100) do |seed, random|
+      model = [nil, *Generators::MODEL_NAMES].sample(random: random)
+      options = Generators.backtest_options(random, model, Generators::STRATEGY_NAMES.sample(random: random))
+      settings = Oracles.backtest_settings(options)
+      length = Oracles.backtest_length(settings)
+      count = random.rand(2..4)
+      short = random.rand(1...count)
+      inputs = Array.new(count) do |index|
+        demand_input(random, options, index == short ? length - 1 : length + extra_length(random))
+      end
+      zero_at = random.rand(0..count) if random.rand < 0.6
+      if zero_at
+        size = random.rand(1..length - 1)
+        values = Array.new(size) { Generators::ZEROS.sample(random: random) }
+        zeros = Generators.backtest_call(random, options, values, keyed: size > 1 && random.rand < 0.5)
+        inputs.insert(zero_at, zeros.input)
+        short += 1 if zero_at <= short
+      end
+      about = "seed #{seed}: #{safe_inspect(inputs)} #{safe_inspect(options)}"
+      error = Foresight::Forecaster.stub(:new, refused) do
+        assert_raises(Foresight::InputError, about) { Foresight.evaluate(inputs, **options) }
+      end
+      assert_equal "series #{short}: #{Oracles.length_message(settings, length - 1)}", error.message, about
+      if zero_at
+        rest = inputs.each_index.to_a - [short]
+        report = Foresight.evaluate(inputs.values_at(*rest), **options)
+        assert_equal typed([1]), typed([report.excluded_series]), about
+        assert_equal rest.size - 1, report.series.size, about
+      end
+      seen << (zero_at.nil? ? :no_zero_series : (zero_at < short ? :zero_before : :zero_after))
+    end
+    assert_equal %i[no_zero_series zero_after zero_before], seen.uniq.sort, "seed #{SEED}"
+  end
+
   private
+
+  def demand_input(random, options, size)
+    values = Generators.backtest_values(random, size, options[:horizon], mixed: random.rand < 0.5)
+    values[random.rand(size)] = random.rand(1..9) if values.all?(&:zero?)
+    Generators.backtest_call(random, options, values, keyed: size > 1 && random.rand < 0.5).input
+  end
+
+  def assert_class_summary(backtests, summary, levels, about)
+    assert_instance_of Foresight::ClassSummary, summary, about
+    counts = COUNT_NAMES.map { |name| backtests.sum(0) { |backtest| backtest[name] } }
+    assert_equal typed([backtests.size, *counts]), typed([summary.series_count, *summary.to_h.values_at(*COUNT_NAMES)]),
+                 about
+    assert_equal summary.held_out, summary.zero_held_out + summary.nonzero_held_out, about
+    MEANS.each { |name| assert_metric Oracles.present_mean(backtests.map(&name)), summary[name], "#{about} #{name}" }
+    PARTS.each do |name|
+      assert_equal levels, summary[name].keys, about
+      levels.each do |level|
+        expected = Oracles.present_mean(backtests.map { |backtest| backtest[name][level] })
+        assert_metric expected, summary[name][level], "#{about} #{name} #{level}"
+      end
+    end
+    levels.each do |level|
+      whole, zero, nonzero = PARTS.map { |name| summary[name][level] }
+      if whole.nil?
+        assert_nil zero, about
+        assert_nil nonzero, about
+      else
+        assert_parts whole, zero, nonzero, about
+      end
+    end
+    origins = backtests.sum(0) { |backtest| backtest.origins.size }
+    assert_equal typed_pairs(pooled_share(backtests, levels, :covered, summary.held_out)),
+                 typed_pairs(summary.coverage), about
+    assert_equal typed_pairs(pooled_share(backtests, levels, :lead_time_hits, origins)),
+                 typed_pairs(summary.lead_time_coverage), about
+  end
+
+  def pooled_share(backtests, levels, name, total)
+    levels.to_h do |level|
+      [level, (Rational(backtests.sum(0) { |backtest| backtest[name][level] }, total).to_f if total.positive?)]
+    end
+  end
+
+  def built_backtest(random, horizon, levels)
+    count = random.rand < 0.25 ? 0 : random.rand(1..5)
+    held_out = horizon * count
+    zero_held_out = random.rand(0..held_out)
+    losses = levels.to_h { |level| [level, built_loss(random, count)] }
+    covered = levels.to_h { |level| [level, random.rand(0..held_out)] }
+    hits = levels.to_h { |level| [level, random.rand(0..count)] }
+    Foresight::Backtest.new(
+      origins: Array.new(count), excluded_origins: random.rand(0..4), zero_scale_origins: random.rand(0..count),
+      held_out: held_out, zero_held_out: zero_held_out, nonzero_held_out: held_out - zero_held_out,
+      mae: built_mean(random, count), rmse: built_mean(random, count), mase: built_mean(random, count),
+      scaled_pinball: losses.transform_values(&:first), scaled_pinball_zero: losses.transform_values { |loss| loss[1] },
+      scaled_pinball_nonzero: losses.transform_values(&:last),
+      coverage: covered.transform_values { |value| value.fdiv(held_out) if held_out.positive? },
+      lead_time_coverage: hits.transform_values { |value| value.fdiv(count) if count.positive? },
+      covered: covered, lead_time_hits: hits
+    )
+  end
+
+  def built_loss(random, count)
+    return [nil, nil, nil] if count.zero? || random.rand < 0.2
+
+    zero = random.rand < 0.2 ? 0.0 : built_float(random)
+    nonzero = built_float(random)
+    [zero + nonzero, zero, nonzero]
+  end
+
+  def built_mean(random, count)
+    built_float(random) unless count.zero? || random.rand < 0.2
+  end
+
+  def built_float(random)
+    random.rand * [0.01, 1.0, 100.0].sample(random: random)
+  end
 
   def assert_parts(whole, zero, nonzero, about)
     [whole, zero, nonzero].each do |part|

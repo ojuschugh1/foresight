@@ -323,7 +323,34 @@ class SeriesTest < Minitest::Test
     assert_equal [Date.new(2028, 2, 29)], Foresight.forecast(leap, model: :naive, count: 1).forecast.keys
   end
 
+  def test_evaluate_prefixes_each_series_error_with_its_index
+    options = { horizon: 1, origins: 1, model: :naive }
+    seen = []
+    each_seed(120) do |seed, random|
+      input, _, kind, message = Generators.invalid_series(random)
+      kind, message = Generators.violation(input, true) unless kind == :container
+      collection = Array.new(random.rand(0..4)) { valid_backtest_series(random, options) }
+      index = random.rand(0..collection.size)
+      collection.insert(index, input)
+      about = "seed #{seed}: #{safe_inspect(collection)}"
+      alone = assert_raises(Foresight::InputError, about) { Foresight.backtest(input, **options) }
+      assert_equal message, alone.message, about
+      error = assert_raises(Foresight::InputError, about) { Foresight.evaluate(collection, **options) }
+      assert_equal "series #{index}: #{message}", error.message, about
+      seen << kind << (index.zero? ? :first : :later)
+    end
+    assert_equal %i[container count first frequency key later negative too_large value], seen.uniq.sort,
+                 "seed #{SEED}"
+  end
+
   private
+
+  def valid_backtest_series(random, options)
+    size = random.rand(1..8)
+    values = Generators.backtest_values(random, size, 1, mixed: random.rand < 0.5)
+    values.map! { Generators::ZEROS.sample(random: random) } if random.rand < 0.2
+    Generators.backtest_call(random, options, values, keyed: size > 1 && random.rand < 0.5).input
+  end
 
   def round_trip_keys(random, unit, size)
     return Generators.regular_keys(random, unit, size) unless unit == :month

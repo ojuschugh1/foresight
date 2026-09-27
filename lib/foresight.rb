@@ -25,6 +25,7 @@ require_relative "foresight/forecaster"
 require_relative "foresight/result"
 require_relative "foresight/metrics"
 require_relative "foresight/backtester"
+require_relative "foresight/evaluation_report"
 
 module Foresight
   DEFAULT_COUNT   = 10
@@ -46,5 +47,9 @@ module Foresight
 
   def self.backtest(series, **options)
     Backtester.new(**options).run(series)
+  end
+
+  def self.evaluate(collection, **options)
+    Backtester.new(**options).evaluate(collection)
   end
 end

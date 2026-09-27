@@ -21,13 +21,46 @@ module Foresight
     def run(series)
       series = Series.parse(series, keys_required: true)
       check_length(series.size)
+      backtest(series)
+    end
+
+    def evaluate(collection)
+      check_collection(collection)
+      parsed = collection.each_with_index.map do |series, index|
+        for_series(index) { Series.parse(series, keys_required: true) }
+      end
+      kept = parsed.each_index.reject { |index| parsed[index].exact.all?(&:zero?) }
+      kept.each { |index| for_series(index) { check_length(parsed[index].size) } }
+      entries = kept.map do |index|
+        series = parsed[index]
+        demand_class = Classifier.call(series.exact).demand_class
+        SeriesEntry.new(index: index, demand_class: demand_class, backtest: backtest(series))
+      end
+      report = EvaluationReport.aggregate(entries, horizon: @horizon, levels: @levels)
+      report.excluded_series = parsed.size - kept.size
+      report
+    end
+
+    private
+
+    def backtest(series)
       prefixes = origin_positions(series.size).to_h { |position| [position, series.prefix(position)] }
       kept = prefixes.reject { |_, prefix| @options[:model].nil? && prefix.exact.all?(&:zero?) }
       results = kept.map { |position, prefix| origin_result(series, position, prefix) }
       aggregate(results, prefixes.size - kept.size)
     end
 
-    private
+    def check_collection(collection)
+      return if Array === collection && !collection.empty?
+
+      raise InputError, "collection must be a non-empty Array of series"
+    end
+
+    def for_series(index)
+      yield
+    rescue InputError => error
+      raise InputError, "series #{index}: #{error.message}"
+    end
 
     def check_length(size)
       origins = @options[:origins]

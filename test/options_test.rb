@@ -259,6 +259,27 @@ class OptionsTest < Minitest::Test
     end
   end
 
+  def test_evaluate_needs_a_non_empty_array_of_series
+    series = { Date.new(2026, 1, 1) => 1, Date.new(2026, 1, 2) => 2 }
+    options = { horizon: 1, origins: 1, model: :naive }
+    [[], nil, { "north" => [1, 2, 3], "south" => [4, 5, 6] }, "1, 2, 3", series, 7].each do |collection|
+      about = safe_inspect(collection)
+      error = assert_raises(Foresight::InputError, about) { Foresight.evaluate(collection, **options) }
+      assert_equal "collection must be a non-empty Array of series", error.message, about
+    end
+    unknown = "unknown option :count; accepted options are :horizon, :origins, :step, :model, :levels, " \
+              ":strategy, :seed, :season_length, :paths, :windows, :alpha, :alpha_d, :alpha_p"
+    [[{}, "horizon is required"], [{ horizon: 2 }, "origins is required"],
+     [{ horizon: 0, origins: 2 }, "horizon must be a positive Integer, got 0"],
+     [{ horizon: 1, origins: 1, count: 5 }, unknown]].each do |rejected, message|
+      [[], nil].each do |collection|
+        about = safe_inspect([collection, rejected])
+        error = assert_raises(Foresight::InputError, about) { Foresight.evaluate(collection, **rejected) }
+        assert_equal message, error.message, about
+      end
+    end
+  end
+
   private
 
   def each_seed(count)
