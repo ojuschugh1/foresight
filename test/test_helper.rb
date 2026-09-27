@@ -78,6 +78,9 @@ module Generators
   STRATEGY_NAMES = %i[distribution conformal].freeze
   OPTION_NAMES = %i[count model levels strategy seed season_length paths windows alpha alpha_d alpha_p].freeze
   INTERMITTENT_NAMES = %i[croston_classic croston_sba tsb].freeze
+  BACKTEST_NAMES = %i[horizon origins step model levels strategy seed season_length paths windows alpha alpha_d
+                      alpha_p].freeze
+  ZEROS = [0, 0.0, -0.0, Rational(0)].freeze
   UNKNOWN_OPTIONS = [:horizon, :origins, :step, :method, :counts, :level, :Count, "count", "model", 7, nil,
                      OpaqueObject.new].freeze
   BAD_SMOOTHING = [false, 0, 1, 0.0, 1.0, -0.1, 1.5, Float::NAN, Float::INFINITY, -Float::INFINITY, Complex(0.5, 0),
@@ -478,6 +481,53 @@ module Generators
       options[:model] = :seasonal_naive
       options[:season_length] = [nil, BAD_OPTION_VALUES[:season_length].sample(random: random)].sample(random: random)
       options.delete(:season_length) if random.rand < 0.3
+    end
+  end
+
+  def backtest_options(random, model, strategy)
+    fixed = { horizon: random.rand(1..7), origins: random.rand(1..5), model: model, strategy: strategy, paths: 200 }
+    fixed[:season_length] = random.rand(1..12) if model == :seasonal_naive
+    chosen = { step: random.rand(1..7), windows: random.rand(2..3) }
+    options = {}
+    BACKTEST_NAMES.each do |name|
+      value = fixed.fetch(name) { chosen.fetch(name) { option_value(random, name) } }
+      optional = !fixed.key?(name) || [nil, :distribution].include?(value)
+      case optional ? random.rand(3) : 0
+      when 0 then options[name] = value
+      when 1 then options[name] = nil
+      end
+    end
+    options.to_a.shuffle(random: random).to_h
+  end
+
+  def backtest_values(random, size, horizon, mixed: false)
+    zero = ZEROS.sample(random: random)
+    pick_zero = -> { mixed ? ZEROS.sample(random: random) : zero }
+    values = numbers(random, size).map { |value| value.zero? || random.rand < 0.1 ? pick_zero.call : [value, 1e6].min }
+    run = random.rand(1..[size - horizon, 1].max)
+    case random.rand(4)
+    when 0 then values.fill(0, run) { pick_zero.call }
+    when 1
+      level = random.rand(1..50)
+      values.fill(0, run) { mixed ? [level, level.to_f, Rational(level)].sample(random: random) : level }
+    end
+    values
+  end
+
+  def backtest_call(random, options, values, keyed:)
+    return Call.new(values, values, nil, options) unless keyed
+
+    keys = forecast_keys(random, values.size)
+    Call.new(keys.zip(values).shuffle(random: random).to_h, values, keys, options)
+  end
+
+  def metric_float(random)
+    case random.rand(6)
+    when 0 then [0.0, -0.0, 0.5, 1.0].sample(random: random)
+    when 1 then random.rand(1..1000).to_f
+    when 2 then random.rand
+    when 3 then random.rand(-1000.0..1000.0)
+    else random.rand(0.0..1e6) / 10**random.rand(0..9)
     end
   end
 end

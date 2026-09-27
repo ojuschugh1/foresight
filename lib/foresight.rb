@@ -23,6 +23,8 @@ require_relative "foresight/simulator"
 require_relative "foresight/conformal_strategy"
 require_relative "foresight/forecaster"
 require_relative "foresight/result"
+require_relative "foresight/metrics"
+require_relative "foresight/backtester"
 
 module Foresight
   DEFAULT_COUNT   = 10
@@ -40,5 +42,9 @@ module Foresight
 
   def self.classify(series)
     Classifier.call(Series.parse(series, keys_required: false).exact)
+  end
+
+  def self.backtest(series, **options)
+    Backtester.new(**options).run(series)
   end
 end

@@ -216,6 +216,49 @@ class OptionsTest < Minitest::Test
     end
   end
 
+  def test_each_rejected_backtest_option_has_its_own_message
+    unknown = "unknown option :count; accepted options are :horizon, :origins, :step, :model, :levels, " \
+              ":strategy, :seed, :season_length, :paths, :windows, :alpha, :alpha_d, :alpha_p"
+    shared = %i[model levels strategy seed season_length paths windows alpha alpha_d alpha_p]
+    reused = MESSAGES.select { |options, _| options.keys.all? { |name| shared.include?(name) } }
+    table = [
+      [{}, "horizon is required"],
+      [{ horizon: nil, origins: 2 }, "horizon is required"],
+      [{ horizon: 2 }, "origins is required"],
+      [{ horizon: 0, origins: 2 }, "horizon must be a positive Integer, got 0"],
+      [{ horizon: 2, origins: 0 }, "origins must be a positive Integer, got 0"],
+      [{ horizon: 2, origins: 1, step: 0 }, "step must be a positive Integer, got 0"],
+      [{ horizon: 2, origins: 1, step: -1 }, "step must be a positive Integer, got -1"],
+      [{ count: 3 }, unknown],
+      [{ horizon: 2, origins: 1, count: 3 }, unknown],
+      [{ horizon: 2, origins: 1, step: 0, model: :arima }, "step must be a positive Integer, got 0"],
+      *reused.map { |options, message| [{ horizon: 2, origins: 3 }.merge(options), message] }
+    ]
+
+    assert_equal 21, reused.size
+    table.each do |options, message|
+      about = safe_inspect(options)
+      [[1, 2, 3], "1, 2, 3", [1, -2, 3]].each do |series|
+        error = assert_raises(Foresight::InputError, about) { Foresight.backtest(series, **options) }
+        assert_equal message, error.message, about
+      end
+    end
+  end
+
+  def test_the_backtest_step_defaults_to_the_horizon
+    assert_equal 3, Foresight::Options.backtest({ horizon: 3, origins: 2 })[:step]
+    [nil, *Generators::MODEL_NAMES].product(Generators::STRATEGY_NAMES).each do |model, strategy|
+      options = { horizon: 3, origins: 2, model: model, strategy: strategy, paths: 200 }
+      options[:season_length] = 4 if model == :seasonal_naive
+      about = safe_inspect(options)
+      expected = Foresight.backtest(EXAMPLE * 3, **options)
+
+      [nil, 3].each { |step| assert_equal expected, Foresight.backtest(EXAMPLE * 3, **options, step: step), about }
+      shifted = Foresight.backtest(EXAMPLE * 3, **options, step: 1)
+      refute_equal expected.origins.map(&:start), shifted.origins.map(&:start), about
+    end
+  end
+
   private
 
   def each_seed(count)

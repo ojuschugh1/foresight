@@ -3,6 +3,8 @@
 module Foresight
   module Options
     FORECAST = %i[count model levels strategy seed season_length paths windows alpha alpha_d alpha_p].freeze
+    BACKTEST = %i[horizon origins step model levels strategy seed season_length paths windows
+                  alpha alpha_d alpha_p].freeze
     STRATEGIES = %i[distribution conformal].freeze
     SMOOTHING = %i[alpha alpha_d alpha_p].freeze
     INTEGERS_AT_LEAST = { 0 => "a non-negative Integer", 1 => "a positive Integer",
@@ -12,8 +14,21 @@ module Foresight
       def forecast(raw)
         check_names(raw, FORECAST)
         supplied = raw.compact
+        { count: integer(supplied, :count, DEFAULT_COUNT, 1), **shared(supplied) }.freeze
+      end
+
+      def backtest(raw)
+        check_names(raw, BACKTEST)
+        supplied = raw.compact
+        horizon = required(supplied, :horizon)
+        origins = required(supplied, :origins)
+        { horizon: horizon, origins: origins, step: integer(supplied, :step, horizon, 1), **shared(supplied) }.freeze
+      end
+
+      private
+
+      def shared(supplied)
         {
-          count: integer(supplied, :count, DEFAULT_COUNT, 1),
           model: model(supplied),
           levels: levels(supplied),
           strategy: strategy(supplied),
@@ -22,10 +37,14 @@ module Foresight
           paths: integer(supplied, :paths, DEFAULT_PATHS, 1),
           windows: integer(supplied, :windows, DEFAULT_WINDOWS, 2),
           **SMOOTHING.to_h { |name| [name, smoothing(supplied, name)] }
-        }.freeze
+        }
       end
 
-      private
+      def required(supplied, name)
+        raise InputError, "#{name} is required" unless supplied.key?(name)
+
+        integer(supplied, name, nil, 1)
+      end
 
       def check_names(raw, accepted)
         names = raw.keys

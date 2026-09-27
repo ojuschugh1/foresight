@@ -345,4 +345,103 @@ module Oracles
     end
     read
   end
+
+  def backtest_settings(options)
+    supplied = options.reject { |_, value| NilClass === value }
+    horizon = supplied[:horizon]
+    shared = option_values(supplied.reject { |name, _| %i[horizon origins step].include?(name) })
+    { horizon: horizon, origins: supplied[:origins], step: supplied.fetch(:step, horizon),
+      **shared.reject { |name, _| name == :count } }
+  end
+
+  def backtest_minimum(settings)
+    model = settings[:model] || :ses
+    least = model == :seasonal_naive ? settings[:season_length] : 1
+    strategy = if settings[:strategy] == :conformal
+                 least + settings[:windows] * settings[:horizon]
+               elsif Generators::INTERMITTENT_NAMES.include?(model)
+                 least
+               else
+                 least + 1
+               end
+    [2, strategy, least].max
+  end
+
+  def backtest_length(settings)
+    backtest_minimum(settings) + settings[:horizon] + settings[:step] * (settings[:origins] - 1)
+  end
+
+  def length_message(settings, size)
+    "the backtest needs at least #{backtest_length(settings)} observations for horizon #{settings[:horizon]}, " \
+      "#{settings[:origins]} origins and step #{settings[:step]}, got #{size}"
+  end
+
+  def origin_positions(size, settings)
+    origins = settings[:origins]
+    (0...origins).map { |origin| size - settings[:horizon] - settings[:step] * (origins - 1 - origin) }
+  end
+
+  def float_value(value)
+    value.to_f.to_r
+  end
+
+  def mase_scale(history)
+    values = history.map { |value| float_value(value) }
+    values.each_cons(2).sum(0r) { |earlier, later| (later - earlier).abs } / (values.size - 1)
+  end
+
+  def mean_absolute_error(actual, forecast)
+    actual.zip(forecast).sum(0r) { |value, predicted| (float_value(value) - float_value(predicted)).abs } / actual.size
+  end
+
+  def mean_squared_error(actual, forecast)
+    total = actual.zip(forecast).sum(0r) do |value, predicted|
+      error = float_value(value) - float_value(predicted)
+      error * error
+    end
+    total / actual.size
+  end
+
+  def pinball(level, quantile, actual)
+    level = level.to_f.to_r
+    quantile = float_value(quantile)
+    actual = float_value(actual)
+    actual >= quantile ? level * (actual - quantile) : (1 - level) * (quantile - actual)
+  end
+
+  def origin_metrics(history, held_out, forecast, quantiles, lead_time_quantiles, levels)
+    scale = mase_scale(history)
+    mae = mean_absolute_error(held_out, forecast)
+    zeros = held_out.map { |value| value.to_f.zero? }
+    covered = levels.to_h do |level|
+      [level, held_out.each_with_index.count { |value, period| value.to_f <= quantiles[level][period] }]
+    end
+    total = held_out.inject(0.0) { |sum, value| sum + value.to_f }
+    { mase_scale: scale, mae: mae, rmse: Math.sqrt(mean_squared_error(held_out, forecast)).to_r,
+      mase: scaled_loss(mae, scale), **pinball_parts(held_out, quantiles, levels, zeros, scale),
+      zero_held_out: zeros.count(true), nonzero_held_out: zeros.count(false), covered: covered,
+      coverage: covered.transform_values { |count| Rational(count, held_out.size).to_f },
+      lead_time_hit: levels.to_h { |level| [level, total <= lead_time_quantiles[level]] } }
+  end
+
+  def pinball_parts(held_out, quantiles, levels, zeros, scale)
+    parts = { scaled_pinball: [true, false], scaled_pinball_zero: [true], scaled_pinball_nonzero: [false] }
+    parts.transform_values do |kept|
+      levels.to_h do |level|
+        losses = held_out.each_with_index.map do |value, period|
+          kept.include?(zeros[period]) ? pinball(level, quantiles[level][period], value) : 0r
+        end
+        [level, scaled_loss(losses.sum(0r) / held_out.size, scale)]
+      end
+    end
+  end
+
+  def scaled_loss(value, scale)
+    value / scale unless scale.zero?
+  end
+
+  def present_mean(values)
+    present = values.compact
+    present.sum(0r, &:to_r) / present.size unless present.empty?
+  end
 end
