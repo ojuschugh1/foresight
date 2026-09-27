@@ -2,12 +2,17 @@
 
 require "test_helper"
 require "ripper"
+require "tmpdir"
 require "foresight"
 
 class PackagingTest < Minitest::Test
   ROOT = File.dirname(__dir__)
   REPOSITORY = "https://github.com/ojuschugh1/foresight"
   FINDER_INDEX = [".DS", "Store"].join("_").freeze
+  COMPONENTS = %w[Naive SeasonalNaive SES CrostonClassic CrostonSBA TSB
+                  GaussianStrategy CompoundStrategy ConformalStrategy].freeze
+  GEM_COMMAND = File.join(RbConfig::CONFIG["bindir"], "gem")
+  SERIES = [0, 3, 0, 0, 5, 0, 0, 2, 0, 4, 0, 0, 1, 0, 6, 0].freeze
 
   MIT_LICENSE = <<~TEXT
     MIT License
@@ -119,7 +124,68 @@ class PackagingTest < Minitest::Test
     assert_empty calls
   end
 
+  def test_each_model_and_strategy_is_the_only_component_defined_in_its_own_library_file
+    defined = Dir.glob("lib/foresight/*.rb", base: ROOT).sort.to_h do |path|
+      [path, File.read(File.join(ROOT, path)).scan(/^\s*class\s+(\w+)/).flatten & COMPONENTS]
+    end
+    defined.reject! { |_, names| names.empty? }
+
+    assert_equal COMPONENTS.sort, defined.values.flatten.sort, safe_inspect(defined)
+    assert_equal COMPONENTS.size, defined.size, safe_inspect(defined)
+    COMPONENTS.each do |name|
+      path = File.realpath(Foresight.const_source_location(name).first)
+      relative = path.delete_prefix(File.join(File.realpath(ROOT), ""))
+
+      assert_equal [name], defined[relative], "#{name} is defined in #{path}"
+    end
+  end
+
+  def test_the_built_gem_installs_and_answers_every_entry_point_in_a_clean_process
+    Dir.mktmpdir do |directory|
+      package = File.join(directory, "foresight.gem")
+      home = File.join(directory, "home")
+      gems = { "GEM_HOME" => home, "GEM_PATH" => home }
+      _, error, status = run_ruby(GEM_COMMAND, "build", "foresight.gemspec", "--output", package, chdir: ROOT)
+
+      assert status.success?, error
+
+      _, error, status = run_ruby(GEM_COMMAND, "install", "--local", "--no-document", "--install-dir", home, package,
+                                  env: gems)
+
+      assert status.success?, error
+      installed = File.join(home, "gems", "foresight-#{Foresight::VERSION}")
+      files = Dir.glob("**/*", base: installed).select { |path| File.file?(File.join(installed, path)) }
+
+      assert_equal gemspec.files.sort, files.sort
+
+      output, error, status = run_ruby("-e", installed_script, env: gems, chdir: directory)
+
+      assert status.success?, error
+      location, dump = output.lines(chomp: true)
+
+      assert_equal File.realpath(File.join(installed, "lib", "foresight.rb")), File.realpath(location)
+      assert_equal Marshal.dump(entry_point_results).unpack1("H*"), dump
+    end
+  end
+
   private
+
+  def installed_script
+    <<~RUBY
+      require "foresight"
+      series = #{SERIES.inspect}
+      results = [Foresight.forecast(series, count: 3, paths: 200), Foresight.classify(series),
+                 Foresight.backtest(series, horizon: 2, origins: 3, paths: 200),
+                 Foresight.evaluate([series, series.rotate(3)], horizon: 2, origins: 2, paths: 200)]
+      puts Foresight.method(:forecast).source_location.first, Marshal.dump(results).unpack1("H*")
+    RUBY
+  end
+
+  def entry_point_results
+    [Foresight.forecast(SERIES, count: 3, paths: 200), Foresight.classify(SERIES),
+     Foresight.backtest(SERIES, horizon: 2, origins: 3, paths: 200),
+     Foresight.evaluate([SERIES, SERIES.rotate(3)], horizon: 2, origins: 2, paths: 200)]
+  end
 
   def gemspec
     Gem::Specification.load(File.join(ROOT, "foresight.gemspec"))

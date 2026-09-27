@@ -26,9 +26,9 @@ end
 
 Warning.singleton_class.prepend(WarningGuard)
 
-def run_ruby(*args)
-  env = ENV.keys.grep(/\A(?:RUBYOPT|RUBYLIB|BUNDLER?_.*)\z/).to_h { |name| [name, nil] }
-  Open3.capture3(env, RbConfig.ruby, *args)
+def run_ruby(*args, env: {}, **options)
+  cleared = ENV.keys.grep(/\A(?:RUBYOPT|RUBYLIB|BUNDLER?_.*)\z/).to_h { |name| [name, nil] }
+  Open3.capture3(cleared.merge(env), RbConfig.ruby, *args, **options)
 end
 
 def safe_inspect(object)
