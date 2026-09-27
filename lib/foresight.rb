@@ -6,6 +6,7 @@ require_relative "foresight/input_error"
 require_relative "foresight/frequency"
 require_relative "foresight/series"
 require_relative "foresight/classifier"
+require_relative "foresight/selector"
 require_relative "foresight/normal"
 require_relative "foresight/empirical_quantile"
 require_relative "foresight/smoothing"
@@ -19,6 +20,7 @@ require_relative "foresight/gaussian_strategy"
 require_relative "foresight/compound_strategy"
 require_relative "foresight/simulator"
 require_relative "foresight/conformal_strategy"
+require_relative "foresight/result"
 
 module Foresight
   DEFAULT_COUNT   = 10
