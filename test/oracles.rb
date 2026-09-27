@@ -55,12 +55,16 @@ module Oracles
     values.inject(values.first) { |level, value| alpha * value + (1 - alpha) * level }
   end
 
-  def one_step_sse(values, alpha)
+  def one_step_errors(values, alpha)
     level = values.first
-    values.each_cons(2).inject(0.0) do |sum, (previous, value)|
+    values.each_cons(2).map do |previous, value|
       level = alpha * previous + (1 - alpha) * level
-      sum + (value - level) * (value - level)
+      value - level
     end
+  end
+
+  def one_step_sse(values, alpha)
+    one_step_errors(values, alpha).inject(0.0) { |sum, error| sum + error * error }
   end
 
   def ses_alpha(values)
@@ -116,5 +120,47 @@ module Oracles
         high = middle
       end
     end
+  end
+
+  def gaussian_quantiles(model, values, options, horizon, levels)
+    season_length = options[:season_length]
+    alpha = ses_alpha(values) if model == :ses
+    forecasts = point_forecasts(model, values, options, horizon)
+    errors = residuals(model, values, season_length, alpha)
+    sigma = Math.sqrt(errors.sum { |error| error * error } / errors.size)
+    covariance = error_covariance(model, horizon, season_length: season_length, alpha: alpha)
+    variances = covariance.each_with_index.map { |row, index| row[index] }
+    total = covariance.sum(&:sum)
+    levels.to_h do |level|
+      deviate = normal_quantile(level)
+      steps = forecasts.zip(variances).map { |forecast, variance| forecast + deviate * sigma * Math.sqrt(variance) }
+      [level, [steps, forecasts.sum + deviate * sigma * Math.sqrt(total)]]
+    end
+  end
+
+  def residuals(model, values, season_length, alpha)
+    case model
+    when :naive then values.each_cons(2).map { |previous, value| value - previous }
+    when :seasonal_naive then values.each_cons(season_length + 1).map { |window| window.last - window.first }
+    when :ses then one_step_errors(values, alpha)
+    end
+  end
+
+  def error_covariance(model, horizon, season_length: nil, alpha: nil)
+    case model
+    when :naive then symmetric_matrix(horizon) { |earlier, _later| earlier }
+    when :seasonal_naive
+      symmetric_matrix(horizon) do |earlier, later|
+        (later - earlier) % season_length == 0 ? 1 + (earlier - 1) / season_length : 0
+      end
+    when :ses
+      square = alpha * alpha
+      symmetric_matrix(horizon) { |earlier, later| (earlier - 1) * square + (earlier == later ? 1 : alpha) }
+    end
+  end
+
+  def symmetric_matrix(horizon)
+    periods = 1..horizon
+    periods.map { |period| periods.map { |other| yield(*[period, other].minmax) } }
   end
 end
