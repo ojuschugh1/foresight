@@ -7,6 +7,26 @@ module Oracles
   SES_LOWER = 0.01
   SES_UPPER = 0.99
   SES_WIDTH = 1e-12
+  OPTION_DEFAULTS = { count: 10, model: nil, levels: [0.5, 0.8, 0.9, 0.95].freeze, strategy: :distribution, seed: 0,
+                      season_length: nil, paths: 10_000, windows: 2, alpha: 0.1, alpha_d: 0.1, alpha_p: 0.1 }.freeze
+  OPTION_MESSAGES = {
+    unknown: "unknown option %s; accepted options are :count, :model, :levels, :strategy, :seed, :season_length, " \
+             ":paths, :windows, :alpha, :alpha_d, :alpha_p",
+    count: "count must be a positive Integer, got %s",
+    model: "model %s is not provided; accepted values are :naive, :seasonal_naive, :ses, :croston_classic, " \
+           ":croston_sba, :tsb",
+    levels: "levels must be a non-empty Array of numbers strictly between 0 and 1",
+    level: "quantile level %s must be strictly between 0 and 1",
+    strategy: "strategy must be :distribution or :conformal, got %s",
+    seed: "seed must be a non-negative Integer, got %s",
+    seasonal_naive: "SeasonalNaive requires a positive Integer season_length, got %s",
+    season_length: "season_length must be a positive Integer, got %s",
+    paths: "paths must be a positive Integer, got %s",
+    windows: "windows must be an Integer of at least 2, got %s",
+    alpha: "alpha must be a finite real number strictly between 0 and 1, got %s",
+    alpha_d: "alpha_d must be a finite real number strictly between 0 and 1, got %s",
+    alpha_p: "alpha_p must be a finite real number strictly between 0 and 1, got %s"
+  }.freeze
 
   module_function
 
@@ -244,5 +264,85 @@ module Oracles
       [value, Rational(candidates.count { |other| other <= value }, candidates.size)]
     end
     levels.to_h { |level| [level, cdf.select { |_, chance| chance >= level.to_r }.keys.min] }
+  end
+
+  def option_error(options)
+    options.each_key do |name|
+      return option_failure(:unknown, Generators.text(name)) unless Generators::OPTION_NAMES.include?(name)
+    end
+    supplied = options.reject { |_, value| NilClass === value }
+    Generators::OPTION_NAMES.each do |name|
+      failure = checked_option(name, supplied.fetch(name, OPTION_DEFAULTS[name]), supplied[:model])
+      return failure if failure
+    end
+    nil
+  end
+
+  def checked_option(name, value, model)
+    case name
+    when :levels then checked_levels(value)
+    when :season_length then checked_season_length(value, model)
+    else option_failure(name, Generators.text(value)) unless accepted_option?(name, value)
+    end
+  end
+
+  def checked_levels(levels)
+    return [:levels, OPTION_MESSAGES[:levels]] unless Array === levels && !levels.empty?
+
+    levels.each { |level| return option_failure(:level, Generators.text(level)) unless inside_unit?(level) }
+    nil
+  end
+
+  def checked_season_length(value, model)
+    if model == :seasonal_naive
+      option_failure(:seasonal_naive, NilClass === value ? "none" : Generators.text(value)) unless at_least?(value, 1)
+    elsif !(NilClass === value || at_least?(value, 1))
+      option_failure(:season_length, Generators.text(value))
+    end
+  end
+
+  def accepted_option?(name, value)
+    case name
+    when :count, :paths then at_least?(value, 1)
+    when :seed then at_least?(value, 0)
+    when :windows then at_least?(value, 2)
+    when :model then NilClass === value || Generators::MODEL_NAMES.include?(value)
+    when :strategy then Generators::STRATEGY_NAMES.include?(value)
+    else inside_unit?(value)
+    end
+  end
+
+  def at_least?(value, minimum)
+    Integer === value && value >= minimum
+  end
+
+  def inside_unit?(value)
+    [Integer, Float, Rational].any? { |type| type === value } && value > 0 && value < 1
+  end
+
+  def option_failure(check, shown)
+    [check, format(OPTION_MESSAGES.fetch(check), shown)]
+  end
+
+  def option_values(options)
+    values = OPTION_DEFAULTS.merge(options.reject { |_, value| NilClass === value })
+    values.merge(levels: distinct_levels(values[:levels]))
+  end
+
+  def distinct_levels(levels)
+    levels.each_with_object([]) { |level, kept| kept << level unless kept.any? { |other| other == level } }.sort
+  end
+
+  def options_read(model, strategy)
+    read = %i[count model levels strategy]
+    read << :season_length if model == :seasonal_naive
+    read << :alpha if %i[croston_classic croston_sba].include?(model)
+    read.push(:alpha_d, :alpha_p) if model == :tsb
+    if strategy == :conformal
+      read << :windows
+    elsif Generators::INTERMITTENT_NAMES.include?(model)
+      read.push(:seed, :paths)
+    end
+    read
   end
 end

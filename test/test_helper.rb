@@ -71,8 +71,31 @@ module Generators
                 [1], OpaqueObject.new].freeze
   NEGATIVE_VALUES = [-1, -250, -0.5, -Float::MIN, -(10**20), Rational(-1, 3), -Float::EPSILON].freeze
   FREQUENCY_ADVICE = "every period must be present, with a value of zero for periods without demand"
+  MODEL_NAMES = %i[naive seasonal_naive ses croston_classic croston_sba tsb].freeze
+  STRATEGY_NAMES = %i[distribution conformal].freeze
+  OPTION_NAMES = %i[count model levels strategy seed season_length paths windows alpha alpha_d alpha_p].freeze
+  INTERMITTENT_NAMES = %i[croston_classic croston_sba tsb].freeze
+  UNKNOWN_OPTIONS = [:horizon, :origins, :step, :method, :counts, :level, :Count, "count", "model", 7, nil,
+                     OpaqueObject.new].freeze
+  BAD_SMOOTHING = [false, 0, 1, 0.0, 1.0, -0.1, 1.5, Float::NAN, Float::INFINITY, -Float::INFINITY, Complex(0.5, 0),
+                   Rational(3, 2), "0.5", OpaqueObject.new].freeze
+  BAD_OPTION_VALUES = {
+    count: [false, true, 0, -1, 5.0, Rational(5), Complex(5, 0), "5", OpaqueObject.new],
+    model: [false, :arima, :Naive, "ses", 1, OpaqueObject.new],
+    levels: [false, 0.5, "0.5", {}, [], 0.5..0.9, OpaqueObject.new],
+    strategy: [false, :gaussian, :compound, "conformal", 1],
+    seed: [false, -1, 1.0, Rational(1), "0", OpaqueObject.new],
+    season_length: [false, 0, -2, 7.0, Rational(12), "12"],
+    paths: [false, 0, -5, 2.5, "100"],
+    windows: [false, 1, 0, -3, 3.0, "2"],
+    alpha: BAD_SMOOTHING, alpha_d: BAD_SMOOTHING, alpha_p: BAD_SMOOTHING
+  }.freeze
+  BAD_LEVELS = [0, 1, -1, 0.0, 1.0, -0.0, 1.5, Float::NAN, Float::INFINITY, -Float::INFINITY, Complex(0.5, 0),
+                Rational(3, 2), Rational(0), "0.5", :half, nil, false, [0.5], OpaqueObject.new].freeze
+  VIOLATIONS = %i[value value value value value value unknown level season season].freeze
 
   Keyed = Struct.new(:input, :keys, :numbers, :period)
+  Call = Struct.new(:input, :numbers, :keys, :options)
 
   module_function
 
@@ -338,5 +361,119 @@ module Generators
 
   def regular?(earlier, later, period)
     Symbol === period ? next_date(earlier, period) == later : later.to_r - earlier.to_r == period
+  end
+
+  def option_value(random, name)
+    case name
+    when :count then random.rand < 0.2 ? 1 : random.rand(1..12)
+    when :model then MODEL_NAMES.sample(random: random)
+    when :levels then option_levels(random)
+    when :strategy then STRATEGY_NAMES.sample(random: random)
+    when :seed then random.rand < 0.2 ? 0 : random.rand(2**64)
+    when :season_length then random.rand(1..12)
+    when :paths then random.rand(1..300)
+    when :windows then random.rand(2..4)
+    else smoothing_value(random)
+    end
+  end
+
+  def smoothing_value(random)
+    case random.rand(10)
+    when 0 then 0.1
+    when 1 then [1e-9, 1 - 1e-9].sample(random: random)
+    when 2, 3 then Rational(random.rand(1..999), 1000)
+    else random.rand(0.001..0.999)
+    end
+  end
+
+  def option_levels(random)
+    levels = Array.new(random.rand(1..6)) do
+      case random.rand(6)
+      when 0 then [1e-6, 1 - 1e-6].sample(random: random)
+      when 1, 2 then [0.5, 0.8, 0.9, 0.95].sample(random: random)
+      else Rational(random.rand(1..999), 1000)
+      end
+    end
+    levels.insert(random.rand(0..levels.size), levels.sample(random: random).to_r) if random.rand < 0.2
+    levels.insert(random.rand(0..levels.size), *[0.5, Rational(1, 2)].shuffle(random: random)) if random.rand < 0.1
+    levels
+  end
+
+  def forecast_options(random, model, strategy)
+    fixed = { model: model, strategy: strategy, paths: 200 }
+    fixed[:season_length] = random.rand(1..12) if model == :seasonal_naive
+    options = {}
+    OPTION_NAMES.each do |name|
+      value = fixed.fetch(name) { option_value(random, name) }
+      optional = !fixed.key?(name) || [nil, :distribution].include?(value)
+      case optional ? random.rand(3) : 0
+      when 0 then options[name] = value
+      when 1 then options[name] = nil
+      end
+    end
+    options.to_a.shuffle(random: random).to_h
+  end
+
+  def shortest_history(options)
+    model = options[:model]
+    if options[:strategy] == :conformal
+      (model == :seasonal_naive ? options[:season_length] : 1) + (options[:windows] || 2) * (options[:count] || 10)
+    elsif model == :seasonal_naive
+      options[:season_length] + 1
+    else
+      INTERMITTENT_NAMES.include?(model) ? 1 : 2
+    end
+  end
+
+  def forecast_keys(random, size)
+    unit = UNITS.sample(random: random)
+    return regular_keys(random, unit, size).first unless unit == :month
+
+    start = random.rand(22_800..24_400)
+    day = random.rand(1..28)
+    Array.new(size) { |index| calendar_date(start + index, day) }
+  end
+
+  def forecast_call(random, model:, strategy:, keyed:)
+    options = forecast_options(random, model, strategy)
+    shortest = shortest_history(options)
+    size = (keyed ? [shortest, 2].max : shortest) + extra_length(random)
+    amounts = numbers(random, size).map { |value| [value, 1e6].min }
+    amounts[random.rand(size)] = random.rand(1..50) if model.nil? && amounts.all?(&:zero?)
+    return Call.new(amounts, amounts, nil, options) unless keyed
+
+    keys = forecast_keys(random, size)
+    Call.new(keys.zip(amounts).shuffle(random: random).to_h, amounts, keys, options)
+  end
+
+  def extra_length(random)
+    choice = random.rand(10)
+    return 0 if choice < 3
+    return random.rand(100..200) if choice == 3
+
+    random.rand(1..40)
+  end
+
+  def invalid_options(random)
+    options = forecast_options(random, [nil, *MODEL_NAMES].sample(random: random),
+                               STRATEGY_NAMES.sample(random: random))
+    (random.rand < 0.6 ? 1 : random.rand(2..3)).times { inject_violation(random, options) }
+    options.to_a.shuffle(random: random).to_h
+  end
+
+  def inject_violation(random, options)
+    case VIOLATIONS.sample(random: random)
+    when :unknown then options[UNKNOWN_OPTIONS.sample(random: random)] = random.rand < 0.4 ? nil : random.rand(1..9)
+    when :value
+      name = OPTION_NAMES.sample(random: random)
+      options[name] = BAD_OPTION_VALUES.fetch(name).sample(random: random)
+    when :level
+      levels = option_levels(random)
+      options[:levels] = levels.insert(random.rand(0..levels.size), BAD_LEVELS.sample(random: random))
+    else
+      options[:model] = :seasonal_naive
+      options[:season_length] = [nil, BAD_OPTION_VALUES[:season_length].sample(random: random)].sample(random: random)
+      options.delete(:season_length) if random.rand < 0.3
+    end
   end
 end

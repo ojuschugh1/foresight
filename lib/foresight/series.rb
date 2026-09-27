@@ -19,6 +19,10 @@ module Foresight
         end
       end
 
+      def describe(supplied)
+        Object === supplied && supplied.respond_to?(:inspect) ? supplied.inspect : "#<#{class_of(supplied)}>"
+      end
+
       private
 
       def parse_keyed(input, keys_required)
@@ -71,10 +75,6 @@ module Foresight
 
       def key_text(key)
         date?(key) ? key.to_s : describe(key)
-      end
-
-      def describe(supplied)
-        Object === supplied && supplied.respond_to?(:inspect) ? supplied.inspect : "#<#{class_of(supplied)}>"
       end
 
       def class_of(supplied)
