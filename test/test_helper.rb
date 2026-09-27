@@ -70,6 +70,9 @@ module Generators
   BAD_VALUES = [nil, "3", Float::NAN, Float::INFINITY, -Float::INFINITY, Complex(1, 0), Complex(2, -3), :five, true,
                 [1], OpaqueObject.new].freeze
   NEGATIVE_VALUES = [-1, -250, -0.5, -Float::MIN, -(10**20), Rational(-1, 3), -Float::EPSILON].freeze
+  TOO_LARGE_VALUES = [1e15.next_float, 2e15, Float::MAX, 10**15 + 1, 10**400, Rational(3 * 10**15 + 1, 3),
+                      Rational(10**400, 7)].freeze
+  INJECTED_VALUES = { value: BAD_VALUES, negative: NEGATIVE_VALUES, too_large: TOO_LARGE_VALUES }.freeze
   FREQUENCY_ADVICE = "every period must be present, with a value of zero for periods without demand"
   MODEL_NAMES = %i[naive seasonal_naive ses croston_classic croston_sba tsb].freeze
   STRATEGY_NAMES = %i[distribution conformal].freeze
@@ -124,7 +127,7 @@ module Generators
       level = random.rand(5.0..50.0)
       cycle = random.rand(4..24)
       Array.new(size) { |index| level * (1 + 0.3 * Math.sin(2 * Math::PI * index / cycle)) }
-    when :erratic then Array.new(size) { random.rand < 0.05 ? 10.0**random.rand(5..300) : random.rand(0.0..100.0) }
+    when :erratic then Array.new(size) { random.rand < 0.05 ? 10.0**random.rand(5..15) : random.rand(0.0..100.0) }
     when :intermittent then Array.new(size) { random.rand < 0.2 ? random.rand(1..3) : 0 }
     else Array.new(size) { random.rand < 0.2 ? random.rand(1..500) : 0 }
     end
@@ -228,22 +231,20 @@ module Generators
     return [injected_numbers(random), random.rand < 0.5] if random.rand < 0.25
 
     sample = keyed(random)
-    kinds = %i[key value negative count frequency].sample(random.rand(1..3), random: random)
+    kinds = %i[key value negative too_large count frequency].sample(random.rand(1..3), random: random)
     pairs = sample.keys.zip(sample.numbers)
     pairs = pairs.first(random.rand(0..1)) if kinds.include?(:count)
     pairs = change(random, pairs, sample.period).last if kinds.include?(:frequency) && !pairs.empty?
     pairs.shuffle!(random: random)
-    replace_value(random, pairs, BAD_VALUES) if kinds.include?(:value)
-    replace_value(random, pairs, NEGATIVE_VALUES) if kinds.include?(:negative)
+    INJECTED_VALUES.each { |kind, pool| replace_value(random, pairs, pool) if kinds.include?(kind) }
     pairs.insert(random.rand(0..pairs.size), [bad_key(random, sample.keys), 1]) if kinds.include?(:key)
     [pairs.to_h, kinds.include?(:count) || random.rand < 0.5]
   end
 
   def injected_numbers(random)
     amounts = numbers(random)
-    %i[value negative].sample(random.rand(1..2), random: random).each do |kind|
-      pool = kind == :value ? BAD_VALUES : NEGATIVE_VALUES
-      amounts.insert(random.rand(0..amounts.size), pool.sample(random: random))
+    INJECTED_VALUES.keys.sample(random.rand(1..3), random: random).each do |kind|
+      amounts.insert(random.rand(0..amounts.size), INJECTED_VALUES.fetch(kind).sample(random: random))
     end
     amounts
   end
@@ -322,7 +323,10 @@ module Generators
     return [:value, "series value #{observed(values, keys, index)} is not a finite real number"] if index
 
     index = values.index { |value| value < 0 }
-    [:negative, "series value #{observed(values, keys, index)} is negative"] if index
+    return [:negative, "series value #{observed(values, keys, index)} is negative"] if index
+
+    index = values.index { |value| value > 10**15 }
+    [:too_large, "series value #{observed(values, keys, index)} is greater than 1e15"] if index
   end
 
   def finite_real?(value)

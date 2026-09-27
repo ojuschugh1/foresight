@@ -2,6 +2,8 @@
 
 module Foresight
   class Series
+    LARGEST_VALUE = 10**15
+
     attr_reader :values, :exact, :keys, :frequency
 
     class << self
@@ -54,6 +56,9 @@ module Foresight
 
         index = exact.index(&:negative?)
         raise InputError, "series value #{observation(exact, keys, index)} is negative" if index
+
+        index = exact.index { |value| value > LARGEST_VALUE }
+        raise InputError, "series value #{observation(exact, keys, index)} is greater than 1e15" if index
       end
 
       def observation(exact, keys, index)

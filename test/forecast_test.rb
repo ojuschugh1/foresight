@@ -156,6 +156,20 @@ class ForecastTest < Minitest::Test
     assert_equal expected.sort, seen.uniq.sort, "seed #{SEED}"
   end
 
+  def test_values_up_to_1e15_give_finite_non_negative_quantiles_under_every_model_and_strategy
+    series = [1e15, 0.0, 10**15, 0, Rational(10**15), 0.0] * 200
+    Generators::MODEL_NAMES.product(Generators::STRATEGY_NAMES, [2, 500]).each do |model, strategy, count|
+      result = Foresight.forecast(series, model: model, strategy: strategy, count: count, season_length: 3,
+                                          levels: [1e-6, 0.5, 0.9, 1 - 1e-6], paths: 200)
+      numbers = result.quantiles.values.flatten + result.lead_time_quantiles.values
+      about = "#{model} under #{strategy} for #{count} periods"
+
+      assert_equal count, result.forecast.size, about
+      assert_equal 4 * count + 4, numbers.size, about
+      assert(numbers.all? { |value| Float === value && value.finite? && value >= 0 }, about)
+    end
+  end
+
   def test_a_specified_model_on_an_all_zero_series_forecasts_zero_without_a_demand_class
     series = [0, -0.0, Rational(0), 0.0] * 4
     Generators::MODEL_NAMES.product(Generators::STRATEGY_NAMES).each do |model, strategy|

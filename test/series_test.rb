@@ -37,7 +37,7 @@ class SeriesTest < Minitest::Test
       assert_equal message, error.message, about
       seen << kind
     end
-    assert_equal %i[container count frequency key negative value], seen.uniq.sort
+    assert_equal %i[container count frequency key negative too_large value], seen.uniq.sort
   end
 
   def test_detected_frequency_keys_the_future_and_holds_for_the_extended_series
@@ -157,6 +157,48 @@ class SeriesTest < Minitest::Test
       keyed = { Time.utc(2026, 1, 2) => value, Time.utc(2026, 1, 1) => 2 }
       error = assert_raises(Foresight::InputError) { parse(keyed) }
       assert_equal "series value #{shown} at key 2026-01-02 00:00:00 UTC is not a finite real number", error.message
+    end
+  end
+
+  def test_values_of_exactly_1e15_are_accepted
+    bound = [10**15, 1e15, Rational(10**15)]
+    keyed = { Date.new(2026, 1, 3) => bound[2], Date.new(2026, 1, 1) => bound[0], Date.new(2026, 1, 2) => bound[1] }
+    [bound, keyed].each do |input|
+      series = parse(input)
+      forecast = Foresight.forecast(input, model: :naive, count: 2).forecast
+
+      assert_equal [1e15] * 3, series.values
+      assert_equal bound.map(&:inspect), series.exact.map(&:inspect)
+      assert_equal :smooth, Foresight.classify(input).demand_class
+      assert_equal [1e15] * 2, Hash === forecast ? forecast.values : forecast
+    end
+  end
+
+  def test_values_greater_than_1e15_are_refused_by_forecast_and_classify
+    Generators::TOO_LARGE_VALUES.each do |value|
+      keyed = { Date.new(2026, 1, 2) => value, Date.new(2026, 1, 1) => 2 }
+      [[[2, value], "position 1"], [keyed, "key 2026-01-02"]].each do |input, place|
+        message = "series value #{value.inspect} at #{place} is greater than 1e15"
+        forecast = assert_raises(Foresight::InputError, message) { Foresight.forecast(input, model: :naive) }
+        classify = assert_raises(Foresight::InputError, message) { Foresight.classify(input) }
+
+        assert_equal message, forecast.message
+        assert_equal message, classify.message
+      end
+    end
+  end
+
+  def test_negative_and_non_finite_values_are_reported_before_values_greater_than_1e15
+    day = Date.new(2026, 1, 1)
+    [
+      [[3, -1, 2e15], "series value -1 at position 1 is negative"],
+      [[3, 2e15, -1], "series value -1 at position 2 is negative"],
+      [{ day + 1 => 10**400, day => 3, day + 2 => -0.5 }, "series value -0.5 at key 2026-01-03 is negative"],
+      [[10**15 + 1, 3, Float::NAN], "series value NaN at position 2 is not a finite real number"],
+      [{ day => Float::MAX, day + 1 => nil }, "series value nil at key 2026-01-02 is not a finite real number"]
+    ].each do |input, message|
+      error = assert_raises(Foresight::InputError) { parse(input) }
+      assert_equal message, error.message
     end
   end
 
