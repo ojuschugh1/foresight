@@ -215,4 +215,34 @@ module Oracles
       total.zero? || (count.denominator == 1 && sums[count.to_i] == 1)
     end
   end
+
+  def conformal_quantiles(model, values, options, horizon, levels)
+    block = options[:windows] * horizon
+    before = values.first(values.size - block)
+    errors = []
+    total_errors = []
+    values.last(block).each_slice(horizon) do |window|
+      refit = point_forecasts(model, before, options, horizon)
+      errors << window.zip(refit).map { |actual, forecast| (actual - forecast).abs }
+      total_errors << (window.sum - refit.sum).abs
+      before += window
+    end
+    forecasts = point_forecasts(model, values, options, horizon)
+    steps = forecasts.each_with_index.map do |forecast, period|
+      empirical_quantiles(plus_minus(forecast, errors.map { |window_errors| window_errors[period] }), levels)
+    end
+    total = empirical_quantiles(plus_minus(forecasts.sum, total_errors), levels)
+    levels.to_h { |level| [level, [steps.map { |quantiles| quantiles[level] }, total[level]]] }
+  end
+
+  def plus_minus(center, errors)
+    errors.map { |error| center - error } + errors.map { |error| center + error }
+  end
+
+  def empirical_quantiles(candidates, levels)
+    cdf = candidates.uniq.to_h do |value|
+      [value, Rational(candidates.count { |other| other <= value }, candidates.size)]
+    end
+    levels.to_h { |level| [level, cdf.select { |_, chance| chance >= level.to_r }.keys.min] }
+  end
 end

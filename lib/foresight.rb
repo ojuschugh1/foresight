@@ -18,6 +18,7 @@ require_relative "foresight/tsb"
 require_relative "foresight/gaussian_strategy"
 require_relative "foresight/compound_strategy"
 require_relative "foresight/simulator"
+require_relative "foresight/conformal_strategy"
 
 module Foresight
   DEFAULT_COUNT   = 10
