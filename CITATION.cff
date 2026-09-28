@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+title: foresight
+version: "0.1.0"
+authors:
+  - family-names: Chugh
+    given-names: Ojus
+license: MIT
+repository-code: "https://github.com/ojuschugh1/foresight"

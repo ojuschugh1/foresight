@@ -95,6 +95,11 @@ class PackagingTest < Minitest::Test
     assert_equal ["LICENSE.txt", "README.md", "lib/foresight.rb", *library].sort, gemspec.files.sort
   end
 
+  def test_gem_leaves_out_the_citation_file
+    assert File.file?(File.join(ROOT, "CITATION.cff"))
+    refute_includes gemspec.files, "CITATION.cff"
+  end
+
   def test_gem_is_pure_ruby_without_runtime_dependencies
     assert_empty gemspec.runtime_dependencies
     assert_empty gemspec.extensions
