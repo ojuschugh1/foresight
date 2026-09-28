@@ -1,0 +1,12 @@
+{
+  "horizon": 7, "origins": 10, "step": 7,
+  "levels": [0.5, 0.8, 0.9, 0.95],
+  "paths": 10000, "windows": 10, "backtest_seed": 20260925,
+  "bootstrap": { "resamples": 2000, "seed": 20260926 },
+  "processes": [
+    { "name": "smooth-gaussian", "kind": "gaussian", "mean": 50.0, "sd": 10.0, "series": 50, "length": 200, "first_seed": 10001 },
+    { "name": "erratic-bernoulli", "kind": "bernoulli", "occurrence": 0.875, "sizes": [[1, 2], [3, 1], [10, 1]], "series": 50, "length": 200, "first_seed": 20001 },
+    { "name": "intermittent-bernoulli", "kind": "bernoulli", "occurrence": 0.25, "sizes": [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1]], "series": 50, "length": 200, "first_seed": 30001 },
+    { "name": "lumpy-bernoulli", "kind": "bernoulli", "occurrence": 0.25, "sizes": [[1, 2], [3, 1], [10, 1]], "series": 50, "length": 200, "first_seed": 40001 }
+  ]
+}
