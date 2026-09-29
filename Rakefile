@@ -10,3 +10,9 @@ Rake::TestTask.new do |t|
 end
 
 task default: :test
+
+desc "Run the calibration study and regenerate the generated document regions"
+task :reproduce do
+  ruby "-Ilib", "validation/study.rb"
+  ruby "-Ilib", "validation/render.rb"
+end

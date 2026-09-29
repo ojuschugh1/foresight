@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "rake"
 require "ripper"
 require "tmpdir"
 require "foresight"
@@ -8,6 +9,7 @@ require "foresight"
 class PackagingTest < Minitest::Test
   ROOT = File.dirname(__dir__)
   REPOSITORY = "https://github.com/ojuschugh1/foresight"
+  REPRODUCE_DESCRIPTION = "Run the calibration study and regenerate the generated document regions"
   FINDER_INDEX = [".DS", "Store"].join("_").freeze
   COMPONENTS = %w[Naive SeasonalNaive SES CrostonClassic CrostonSBA TSB
                   GaussianStrategy CompoundStrategy ConformalStrategy].freeze
@@ -117,6 +119,19 @@ class PackagingTest < Minitest::Test
 
     assert status.success?, error
     assert_equal ["Foresight"], output.split
+  end
+
+  def test_the_rakefile_defines_a_described_reproduce_task_that_the_default_task_does_not_run
+    Rake::TaskManager.record_task_metadata = true
+    app = Rake::Application.new
+    Rake.with_application(app) { Dir.chdir(ROOT) { load File.join(ROOT, "Rakefile") } }
+    reproduce = app.lookup("reproduce")
+
+    refute_nil reproduce
+    assert_equal REPRODUCE_DESCRIPTION, reproduce.comment
+    assert_empty reproduce.prerequisites
+    assert_equal ["test"], app.lookup("default").prerequisites
+    refute_nil app.lookup("test")
   end
 
   def test_no_test_file_calls_skip

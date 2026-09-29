@@ -3,9 +3,11 @@
 require "test_helper"
 require "minitest/mock"
 require "digest"
+require "fileutils"
 require "json"
 require "tmpdir"
 require "foresight"
+require_relative "../validation/render"
 require_relative "../validation/study"
 
 class StudyTest < Minitest::Test
@@ -366,7 +368,86 @@ class StudyTest < Minitest::Test
     end
   end
 
+  def test_the_reduced_results_render_into_copies_of_both_documents_identically_twice
+    with_study_files do |files, subset|
+      Study.run(**files)
+      copies = document_copies(File.dirname(files[:output_path]))
+      regions = Render.run(results_path: files[:output_path], document_paths: copies)
+      rendered = copies.transform_values { |copy| File.binread(copy) }
+      Render.run(results_path: files[:output_path], document_paths: copies)
+
+      assert_equal rendered, copies.transform_values { |copy| File.binread(copy) }
+      assert_equal File.binread(Render::DOCUMENTS[:methodology]), rendered[:methodology]
+      assert_equal Render::REGIONS.sort, regions.keys.sort
+      assert_equal Render::REGIONS.sort, rendered.values.join.scan(/^<!-- generated:([a-z-]+) -->$/).flatten.sort
+      regions.each do |name, body|
+        refute_empty body, name
+        assert_includes rendered.values.join, "<!-- generated:#{name} -->\n#{body}\n<!-- /generated:#{name} -->"
+      end
+      rendered.each_value { |text| assert_equal text, Render.fill(text, regions) }
+      short = subset["series"].find { |entry| entry["stock_code"] == SHORT_CODE }
+      message = assert_raises(Foresight::InputError) do
+        Foresight.backtest(short["values"], strategy: :conformal, **backtest_settings)
+      end.message
+
+      assert_includes regions["summary-real"], "Series set aside because they had no non-zero observation: 1."
+      assert_includes regions["summary-real"], "- `#{SHORT_CODE}` under the conformal quantiles: #{message}"
+      assert_includes regions["summary-real"], "| smooth | 1 |"
+      assert_includes regions["summary-real"], " undefined |"
+      assert_includes regions["summary-real"], "] (2 series) |"
+      refute_includes regions["summary-synthetic"], " series) |"
+      assert_includes regions["configuration"], "| origins | 2 |\n"
+      assert_includes regions["configuration"], "| calibration windows | 2 |\n"
+      assert_equal PROCESSES.map { |process| "| #{process["name"]} |" },
+                   regions["processes"].lines.drop(2).map { |line| line[/\A\| [a-z-]+ \|/] }
+    end
+  end
+
+  def test_a_document_with_a_missing_duplicated_unknown_or_disordered_marker_fails_the_render_and_stays_unchanged
+    with_study_files do |files|
+      Study.run(**files)
+      copies = document_copies(File.dirname(files[:output_path]))
+      Render.run(results_path: files[:output_path], document_paths: copies)
+      validation = File.binread(copies[:validation])
+      start = "<!-- generated:parity -->"
+      finish = "<!-- /generated:parity -->"
+      parity = /^#{Regexp.escape(start)}\n.*?^#{Regexp.escape(finish)}\n/m
+      methodology = File.binread(copies[:methodology])
+      defaults = methodology[%r{^<!-- generated:defaults -->\n.*?^<!-- /generated:defaults -->$}m]
+      broken = {
+        "missing end marker" => validation.sub("#{finish}\n", ""),
+        "missing start marker" => validation.sub("#{start}\n", ""),
+        "duplicated region" => validation.sub(finish, "#{finish}\n\n#{start}\n#{finish}"),
+        "duplicated end marker" => validation.sub(finish, "#{finish}\n#{finish}"),
+        "end marker before the start marker" => validation.sub(start, "swap").sub(finish, start).sub("swap", finish),
+        "unknown region" => validation.gsub("generated:parity", "generated:extra"),
+        "region absent from both documents" => validation.sub(parity, ""),
+        "region present in both documents" => "#{validation}\n#{defaults}\n"
+      }
+
+      broken.each do |about, text|
+        File.write(copies[:validation], text)
+        before = copies.transform_values { |copy| File.binread(copy) }
+        error = assert_raises(Render::Error, about) do
+          Render.run(results_path: files[:output_path], document_paths: copies)
+        end
+
+        assert_match(/\b(?:parity|extra|defaults)\b/, error.message, about)
+        assert_equal before, copies.transform_values { |copy| File.binread(copy) }, about
+        assert_empty Dir.children(File.dirname(files[:output_path])).grep(/\.tmp\z/), about
+      end
+    end
+  end
+
   private
+
+  def document_copies(dir)
+    Render::DOCUMENTS.to_h do |name, path|
+      copy = File.join(dir, File.basename(path))
+      FileUtils.cp(path, copy)
+      [name, copy]
+    end
+  end
 
   def each_seed(count)
     rng = Random.new(SEED)
