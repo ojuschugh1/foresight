@@ -15,6 +15,9 @@ class StudyTest < Minitest::Test
   ROOT = File.dirname(__dir__)
   LIB = File.join(ROOT, "lib")
   STUDY_FILE = File.join(ROOT, "validation", "study.rb")
+  RESULTS_FILE = File.join(ROOT, "validation", "study_results.json")
+  CONFIG_FILE = File.join(ROOT, "validation", "study_config.json")
+  SUBSET_FILE = File.join(ROOT, "data", "online_retail_ii_subset.json")
   VALIDATION_FILES = %w[bootstrap study truth].map { |name| File.join(ROOT, "validation", "#{name}.rb") }.freeze
   STRATEGIES = %w[distribution conformal].freeze
   STATISTICS = %w[coverage lead_time_coverage scaled_pinball].freeze
@@ -69,6 +72,8 @@ class StudyTest < Minitest::Test
   PROCESS_KEYS = %w[name series origins held_out levels].freeze
   TRUTH_KEYS = %w[coverage lead_time_coverage step_quantile total_quantile step_probability
                   total_probability].freeze
+  EXCLUSION_KEYS = %w[id strategy message].freeze
+  POOLED_MINIMUMS = { "held_out" => 1000, "origins" => 200 }.freeze
 
   def test_study_results_shaped_documents_round_trip_through_json
     seen = []
@@ -221,9 +226,7 @@ class StudyTest < Minitest::Test
       results = Study.run(**files)
       first = File.binread(files[:output_path])
       Study.run(**files)
-      seeded = PROCESSES.map do |process|
-        process.merge("seeds" => Array.new(process["series"]) { |index| process["first_seed"] + index })
-      end
+      seeded = PROCESSES.map { |process| process.merge("seeds" => process_seeds(process)) }
 
       assert_equal first, File.binread(files[:output_path])
       assert_equal "#{JSON.pretty_generate(results)}\n", first
@@ -260,8 +263,8 @@ class StudyTest < Minitest::Test
       assert_equal field(real, "id"), field(real, "stock_code")
       assert_equal [nil], (field(real, "process") + field(real, "seed")).uniq
       assert_equal %w[intermittent intermittent smooth], field(real, "demand_class")
-      assert_series_records(synthetic, "synthetic")
-      assert_series_records(real, "real")
+      assert_series_records(synthetic, "synthetic", REDUCED_CONFIG)
+      assert_series_records(real, "real", REDUCED_CONFIG)
     end
   end
 
@@ -269,48 +272,95 @@ class StudyTest < Minitest::Test
     with_study_files do |files|
       results = Study.run(**files)
 
-      assert_equal [2, 0, 2, 0], assert_class_records(results["synthetic"], 0, "synthetic")
-      assert_equal [1, 0, 2, 0], assert_class_records(results["real"], DEMAND_CLASSES.size, "real")
+      assert_equal [2, 0, 2, 0], assert_class_records(results["synthetic"], 0, "synthetic", REDUCED_CONFIG)
+      assert_equal [1, 0, 2, 0], assert_class_records(results["real"], DEMAND_CLASSES.size, "real", REDUCED_CONFIG)
     end
   end
 
   def test_the_reduced_process_records_pool_each_process_and_carry_its_true_quantiles
     with_study_files do |files|
-      synthetic = Study.run(**files)["synthetic"]
-      levels = SETTINGS["levels"]
+      assert_process_records(Study.run(**files)["synthetic"], REDUCED_CONFIG)
+    end
+  end
 
-      assert_equal PROCESSES.map { |process| process["name"] }, synthetic["processes"].map { |record| record["name"] }
-      synthetic["processes"].zip(PROCESSES).each do |record, process|
-        members = synthetic["series"].select { |series| series["process"] == process["name"] }
-        pooled = oracle_statistics(members, levels)
-        truths = Truth.quantiles(process, horizon: SETTINGS["horizon"], levels: levels)
-        about = process["name"]
+  def test_the_committed_results_parse_round_trip_and_match_the_schema
+    text = File.binread(RESULTS_FILE)
+    results = JSON.parse(text)
+    parsed = JSON.parse(JSON.generate(results))
+    config = committed_config
+    seeded = config["processes"].map { |process| process.merge("seeds" => process_seeds(process)) }
 
-        assert_equal PROCESS_KEYS, record.keys, about
-        assert_equal typed([members.size, *members_sum(members, %w[origins held_out])]),
-                     typed(record.values_at("series", "origins", "held_out")), about
-        assert_equal levels, record["levels"].map { |entry| entry["level"] }, about
-        record["levels"].each do |entry|
-          level = entry["level"]
-          truth = entry["truth"]
-          where = "#{about} #{level}"
+    assert_equal results, parsed
+    assert_equal typed(results), typed(parsed)
+    assert_equal "#{JSON.pretty_generate(results)}\n", text
+    assert_equal RESULT_KEYS, results.keys
+    assert_equal Foresight::VERSION, results["foresight_version"]
+    assert_match(/\A\d+\.\d+\.\d+\z/, results["ruby_version"])
+    assert_match(/\A\S+-\S+\z/, results["ruby_platform"])
+    assert_equal typed(config.merge("processes" => seeded)), typed(results["config"])
+    assert_equal SECTION_KEYS + ["processes"], results["synthetic"].keys
+    assert_equal SECTION_KEYS, results["real"].keys
+    %w[synthetic real].each do |name|
+      section = results[name]
 
-          assert_equal %w[level distribution conformal truth], entry.keys, where
-          STRATEGIES.each do |strategy|
-            assert_equal typed(pooled[strategy][level].slice("coverage", "lead_time_coverage")),
-                         typed(entry[strategy]), where
-          end
-          assert_equal TRUTH_KEYS, truth.keys, where
-          assert_equal typed([truths[level].step_quantile.to_f, truths[level].total_quantile.to_f,
-                              truths[level].step_probability&.to_f, truths[level].total_probability&.to_f]),
-                       typed(truth.values_at("step_quantile", "total_quantile", "step_probability",
-                                             "total_probability")), where
-          %w[coverage lead_time_coverage].each do |name|
-            assert_instance_of Float, truth[name], "#{where} #{name}"
-            assert_includes 0.0..1.0, truth[name], "#{where} #{name}"
-          end
-        end
+      assert_kind_of Integer, section["excluded_all_zero"], name
+      section["excluded"].each do |entry|
+        assert_equal EXCLUSION_KEYS, entry.keys, name
+        assert_includes STRATEGIES, entry["strategy"], name
+        assert_equal [String, String], entry.values_at("id", "message").map(&:class), name
       end
+      assert_equal DEMAND_CLASSES, section["classes"].map { |record| record["demand_class"] }, name
+      assert_series_records(section, name, config)
+    end
+  end
+
+  def test_the_committed_results_record_unique_seeds_the_subset_digest_and_enough_pooled_observations
+    results = committed_results
+    config = committed_config
+    synthetic = results["synthetic"]
+    real = results["real"]
+    recorded = subset_series.to_h { |entry| [entry["stock_code"], entry["demand_class"]] }
+    generated = config["processes"].flat_map do |process|
+      process_seeds(process).map { |seed| "#{process["name"]}/#{seed}" }
+    end
+    seeds = field(synthetic, "seed")
+    listed = field(synthetic, "id") + synthetic["excluded"].map { |entry| entry["id"] }
+
+    assert_equal Digest::SHA256.file(SUBSET_FILE).hexdigest, results["real_subset_sha256"]
+    assert_equal [Integer], seeds.map(&:class).uniq
+    assert_equal seeds.uniq, seeds
+    assert_equal field(synthetic, "id"), field(synthetic, "process").zip(seeds).map { |name, seed| "#{name}/#{seed}" }
+    assert_empty listed - generated
+    assert_equal generated.size, listed.size + synthetic["excluded_all_zero"]
+    assert_equal [nil], field(synthetic, "stock_code").uniq
+    assert_equal [nil], (field(real, "process") + field(real, "seed")).uniq
+    assert_equal field(real, "id"), field(real, "stock_code")
+    real["series"].each do |record|
+      assert recorded.key?(record["id"]), "#{record["id"]} is not in the subset"
+      assert_equal recorded[record["id"]], record["demand_class"], record["id"]
+    end
+    assert_equal recorded.size, real["series"].size + real["excluded"].size + real["excluded_all_zero"]
+    assert_process_records(synthetic, config)
+    synthetic["processes"].each do |record|
+      POOLED_MINIMUMS.each { |name, minimum| assert_operator record[name], :>=, minimum, "#{record["name"]} #{name}" }
+    end
+  end
+
+  def test_the_committed_class_records_recompute_from_their_series_records_with_seeded_intervals
+    results = committed_results
+    config = committed_config
+    subset = subset_series.group_by { |entry| entry["demand_class"] }
+    excluded = results["real"]["excluded"].map { |entry| entry["id"] }
+    synthetic_counts = assert_class_records(results["synthetic"], 0, "synthetic", config)
+    real_counts = assert_class_records(results["real"], DEMAND_CLASSES.size, "real", config)
+
+    assert_equal results["synthetic"]["series"].size, synthetic_counts.sum
+    assert_equal results["real"]["series"].size, real_counts.sum
+    results["real"]["classes"].each do |record|
+      members = subset.fetch(record["demand_class"], [])
+
+      assert_equal members.count { |entry| !excluded.include?(entry["stock_code"]) }, record["series"],
+                   record["demand_class"]
     end
   end
 
@@ -675,26 +725,41 @@ class StudyTest < Minitest::Test
   end
 
   def synthetic_ids
-    PROCESSES.flat_map do |process|
-      Array.new(process["series"]) { |index| "#{process["name"]}/#{process["first_seed"] + index}" }
-    end
+    PROCESSES.flat_map { |process| process_seeds(process).map { |seed| "#{process["name"]}/#{seed}" } }
+  end
+
+  def process_seeds(process)
+    Array.new(process["series"]) { |index| process["first_seed"] + index }
+  end
+
+  def committed_results
+    JSON.parse(File.read(RESULTS_FILE))
+  end
+
+  def committed_config
+    JSON.parse(File.read(CONFIG_FILE))
+  end
+
+  def subset_series
+    JSON.parse(File.read(SUBSET_FILE))["series"]
   end
 
   def field(section, name)
     section["series"].map { |record| record[name] }
   end
 
-  def assert_series_records(section, about)
+  def assert_series_records(section, about, config)
     section["series"].each do |record|
       where = "#{about} #{record["id"]}"
 
       assert_equal SERIES_KEYS, record.keys, where
       assert_includes DEMAND_CLASSES, record["demand_class"], where
-      assert_equal typed([SETTINGS["horizon"] * record["origins"], record["held_out"]]),
+      assert_includes 0..config["origins"], record["origins"], where
+      assert_equal typed([config["horizon"] * record["origins"], record["held_out"]]),
                    typed([record["held_out"], record["zero_held_out"] + record["nonzero_held_out"]]), where
       STRATEGIES.each do |strategy|
         assert_equal STRATEGY_KEYS, record[strategy].keys, where
-        assert_equal SETTINGS["levels"], record[strategy]["levels"].map { |entry| entry["level"] }, where
+        assert_equal config["levels"], record[strategy]["levels"].map { |entry| entry["level"] }, where
         record[strategy]["levels"].each do |entry|
           at = "#{where} #{strategy} #{entry["level"]}"
 
@@ -710,30 +775,69 @@ class StudyTest < Minitest::Test
     end
   end
 
-  def assert_class_records(section, offset, about)
-    levels = SETTINGS["levels"]
+  def assert_process_records(synthetic, config)
+    levels = config["levels"]
+    processes = config["processes"]
+
+    assert_equal processes.map { |process| process["name"] }, synthetic["processes"].map { |record| record["name"] }
+    synthetic["processes"].zip(processes).each do |record, process|
+      members = synthetic["series"].select { |series| series["process"] == process["name"] }
+      pooled = oracle_statistics(members, levels)
+      truths = Truth.quantiles(process, horizon: config["horizon"], levels: levels)
+      about = process["name"]
+
+      assert_equal PROCESS_KEYS, record.keys, about
+      assert_equal typed([members.size, *members_sum(members, %w[origins held_out])]),
+                   typed(record.values_at("series", "origins", "held_out")), about
+      assert_equal levels, record["levels"].map { |entry| entry["level"] }, about
+      record["levels"].each do |entry|
+        level = entry["level"]
+        truth = entry["truth"]
+        where = "#{about} #{level}"
+
+        assert_equal %w[level distribution conformal truth], entry.keys, where
+        STRATEGIES.each do |strategy|
+          assert_equal typed(pooled[strategy][level].slice("coverage", "lead_time_coverage")),
+                       typed(entry[strategy]), where
+        end
+        assert_equal TRUTH_KEYS, truth.keys, where
+        assert_equal typed([truths[level].step_quantile.to_f, truths[level].total_quantile.to_f,
+                            truths[level].step_probability&.to_f, truths[level].total_probability&.to_f]),
+                     typed(truth.values_at("step_quantile", "total_quantile", "step_probability",
+                                           "total_probability")), where
+        %w[coverage lead_time_coverage].each do |name|
+          assert_instance_of Float, truth[name], "#{where} #{name}"
+          assert_includes 0.0..1.0, truth[name], "#{where} #{name}"
+        end
+      end
+    end
+  end
+
+  def assert_class_records(section, offset, about, config)
+    levels = config["levels"]
+    bootstrap = config["bootstrap"]
     section["classes"].each_with_index.map do |record, index|
       demand_class = DEMAND_CLASSES[index]
       members = section["series"].select { |series| series["demand_class"] == demand_class }
-      seed = SETTINGS["bootstrap"]["seed"] + offset + index
-      intervals = Bootstrap.intervals(members, levels: levels, resamples: SETTINGS["bootstrap"]["resamples"],
-                                               seed: seed)
+      seed = bootstrap["seed"] + offset + index
+      intervals = Bootstrap.intervals(members, levels: levels, resamples: bootstrap["resamples"], seed: seed)
       where = "#{about} #{demand_class}"
 
       assert_equal CLASS_KEYS, record.keys, where
       assert_equal typed([demand_class, members.size, seed]),
                    typed(record.values_at("demand_class", "series", "bootstrap_seed")), where
       assert_equal typed(members_sum(members, COUNTS)), typed(record.values_at(*COUNTS)), where
-      assert_equal [Integer, Integer], record.values_at("excluded_origins", "zero_scale_origins").map(&:class), where
+      assert_equal members.sum { |member| config["origins"] - member["origins"] }, record["excluded_origins"], where
+      assert_kind_of Integer, record["zero_scale_origins"], where
       STRATEGIES.each do |strategy|
-        assert_class_strategy(record, members, intervals, strategy, where)
+        assert_class_strategy(record, members, intervals, strategy, where, levels)
       end
-      assert_class_differences(record, intervals, where)
+      assert_class_differences(record, members, intervals, where, levels)
       members.size
     end
   end
 
-  def assert_class_strategy(record, members, intervals, strategy, where)
+  def assert_class_strategy(record, members, intervals, strategy, where, levels)
     summary = record[strategy]
     held_out, origins = members_sum(members, %w[held_out origins])
 
@@ -742,7 +846,7 @@ class StudyTest < Minitest::Test
       assert_same_value sequential_mean(members.filter_map { |member| member[strategy][name] }), summary[name],
                         "#{where} #{strategy} #{name}"
     end
-    assert_equal SETTINGS["levels"], summary["levels"].map { |entry| entry["level"] }, where
+    assert_equal levels, summary["levels"].map { |entry| entry["level"] }, where
     summary["levels"].each do |entry|
       level = entry["level"]
       at = "#{where} #{strategy} #{level}"
@@ -756,22 +860,17 @@ class StudyTest < Minitest::Test
         assert_same_value sequential_mean(pooled.filter_map { |candidate| candidate[name] }), entry[name],
                           "#{at} #{name}"
       end
+      assert_parts entry.values_at(*PARTS), at
       STATISTICS.each do |statistic|
-        interval = entry["#{statistic}_interval"]
-
-        assert_same_value intervals[strategy][level]["#{statistic}_interval"], interval, "#{at} #{statistic}"
-        if members.size < 2
-          assert_nil interval, "#{at} #{statistic}"
-        elsif entry[statistic]
-          assert_equal [Float, Float], interval.map(&:class), "#{at} #{statistic}"
-        end
+        assert_interval entry["#{statistic}_interval"], intervals[strategy][level]["#{statistic}_interval"],
+                        members.size, pooled.all? { |candidate| candidate[statistic] }, "#{at} #{statistic}"
       end
     end
   end
 
-  def assert_class_differences(record, intervals, where)
+  def assert_class_differences(record, members, intervals, where, levels)
     record["difference"]["levels"].each_with_index do |entry, position|
-      level = SETTINGS["levels"][position]
+      level = levels[position]
       distribution, conformal = STRATEGIES.map { |strategy| record[strategy]["levels"][position] }
       expected = oracle_differences(distribution, conformal, level)
       at = "#{where} difference #{level}"
@@ -779,10 +878,28 @@ class StudyTest < Minitest::Test
       assert_equal DIFFERENCE_KEYS, entry.keys, at
       assert_equal level, entry["level"], at
       DIFFERENCES.each do |name|
+        statistic = name.delete_suffix("_error")
+        defined = members.all? do |member|
+          STRATEGIES.all? do |strategy|
+            member[strategy]["levels"].find { |candidate| candidate["level"] == level }[statistic]
+          end
+        end
+
         assert_same_value expected[name], entry[name], "#{at} #{name}"
-        assert_same_value intervals["difference"][level]["#{name}_interval"], entry["#{name}_interval"],
-                          "#{at} #{name}"
+        assert_interval entry["#{name}_interval"], intervals["difference"][level]["#{name}_interval"], members.size,
+                        defined, "#{at} #{name}"
       end
+    end
+  end
+
+  def assert_interval(interval, expected, count, defined, about)
+    assert_same_value expected, interval, about
+    if count < 2
+      assert_nil interval, about
+    elsif defined
+      refute_nil interval, about
+      assert_equal [Float, Float], interval.map(&:class), about
+      assert_operator interval.first, :<=, interval.last, about
     end
   end
 
