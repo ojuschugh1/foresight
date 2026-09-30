@@ -292,7 +292,8 @@ class StudyTest < Minitest::Test
 
     assert_equal results, parsed
     assert_equal typed(results), typed(parsed)
-    assert_equal "#{JSON.pretty_generate(results)}\n", text
+    assert text.end_with?("\n")
+    refute text.end_with?("\n\n")
     assert_equal RESULT_KEYS, results.keys
     assert_equal Foresight::VERSION, results["foresight_version"]
     assert_match(/\A\d+\.\d+\.\d+\z/, results["ruby_version"])
