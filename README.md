@@ -10,13 +10,25 @@ Foresight is a prototype. It implements the architecture and measures the calibr
 
 ## Installation
 
-Foresight is not published on rubygems.org yet. Install it from the GitHub source, either through Bundler:
+Add Foresight to your Gemfile:
+
+```ruby
+gem "foresight"
+```
+
+or install it directly:
+
+```sh
+gem install foresight
+```
+
+To use the current source instead of the released gem, point Bundler at the GitHub repository:
 
 ```ruby
 gem "foresight", git: "https://github.com/ojuschugh1/foresight"
 ```
 
-or by building the gem locally:
+or build the gem locally:
 
 ```sh
 git clone https://github.com/ojuschugh1/foresight

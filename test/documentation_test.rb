@@ -54,6 +54,7 @@ class DocumentationTest < Minitest::Test
   ].freeze
   INSTALLATION = [
     "Linux and macOS", "zero runtime dependencies",
+    %(```ruby\ngem "foresight"\n```), "gem install foresight",
     'gem "foresight", git: "https://github.com/ojuschugh1/foresight"', "gem build foresight.gemspec",
     "gem install ./foresight-#{Foresight::VERSION}.gem"
   ].freeze
